@@ -22,7 +22,7 @@ from database import (
     update_pokemon,
 )
 from pokeapi_client import PokeAPIError
-from utils import EMBED_COLOR, format_moves, load_species, mon_title
+from utils import EMBED_COLOR, format_ability, format_moves, load_species, mon_title
 
 log = logging.getLogger(__name__)
 
@@ -54,10 +54,6 @@ def is_master():
 
     return app_commands.check(predicate)
 
-
-# --------------------------------------------------------------------------- #
-#                              АВТОДОПОЛНЕНИЯ                                 #
-# --------------------------------------------------------------------------- #
 
 async def _species_autocomplete(
     interaction: discord.Interaction, current: str
@@ -103,7 +99,6 @@ async def _species_autocomplete(
 async def _instance_autocomplete(
     interaction: discord.Interaction, current: str
 ):
-    """Подсказывает ID покемонов выбранного мастера пользователя."""
     user: Optional[discord.Member] = interaction.namespace.user
     if user is None:
         return []
@@ -123,9 +118,36 @@ async def _instance_autocomplete(
     return out
 
 
-# --------------------------------------------------------------------------- #
-#                                  COG                                        #
-# --------------------------------------------------------------------------- #
+async def _ability_autocomplete(
+    interaction: discord.Interaction, current: str
+):
+    """Подсказывает способности того покемона, чей ID выбран."""
+    iid = (interaction.namespace.instance_id or "").strip().lower()
+    user: Optional[discord.Member] = interaction.namespace.user
+    if not iid or user is None:
+        return []
+    mon = await get_pokemon(user.id, iid)
+    if not mon:
+        return []
+    try:
+        data = await pokeapi_client.get_pokemon(mon["species_id"])
+    except PokeAPIError:
+        return []
+
+    cur = current.strip().lower()
+    out = []
+    for ab in data.get("abilities", []) or []:
+        name = ab["name"]
+        if ab.get("is_hidden"):
+            label = f"{name.replace('-', ' ').title()} (скрытая)"
+        else:
+            label = name.replace("-", " ").title()
+        if not cur or cur in name or cur in label.lower():
+            out.append(app_commands.Choice(name=label[:100], value=name))
+        if len(out) >= 25:
+            break
+    return out
+
 
 class Admin(commands.Cog):
     """Команды для мастеров игры."""
@@ -162,6 +184,7 @@ class Admin(commands.Cog):
         gender="Пол. Не укажете — определится случайно по виду.",
         nickname="Кличка (необязательно)",
         moves="Атаки через запятую, 1–4 (не укажете — 4 случайные)",
+        ability="Способность (не укажете — выберется случайная обычная)",
     )
     @app_commands.choices(gender=GENDER_CHOICES)
     @is_master()
@@ -175,6 +198,7 @@ class Admin(commands.Cog):
         gender: Optional[app_commands.Choice[str]] = None,
         nickname: Optional[str] = None,
         moves: Optional[str] = None,
+        ability: Optional[str] = None,
     ) -> None:
         await interaction.response.defer(ephemeral=True)
 
@@ -205,6 +229,12 @@ class Admin(commands.Cog):
         else:
             final_moves = pokeapi_client.pick_random_moves(data, 4)
 
+        # Способность: указана мастером или случайная обычная
+        if ability:
+            final_ability = ability.strip().lower().replace(" ", "-")
+        else:
+            final_ability = pokeapi_client.pick_random_ability(data)
+
         nick = (nickname or "").strip() or None
         if nick and len(nick) > 20:
             await interaction.followup.send("❌ Кличка не длиннее 20 символов.", ephemeral=True)
@@ -220,6 +250,7 @@ class Admin(commands.Cog):
             "level": int(level),
             "gender": mon_gender,
             "moves": final_moves,
+            "ability": final_ability,
         }
         added_to_party = await add_pokemon(user.id, mon, to_party=to_party)
         await add_to_pokedex(user.id, data["id"])
@@ -227,6 +258,7 @@ class Admin(commands.Cog):
         species_data = await load_species([mon])
         title = mon_title(mon, species_data)
         place = "команду" if added_to_party else "ПК"
+        ability_ru = await pokeapi_client.get_ability_ru(final_ability) if final_ability else "—"
 
         embed = discord.Embed(
             title="✅ Покемон выдан",
@@ -235,6 +267,7 @@ class Admin(commands.Cog):
                 f"**Покемон:** {title}\n"
                 f"**Уровень:** {mon['level']}\n"
                 f"**Пол:** {mon_gender} ({gender_source})\n"
+                f"**Способность:** {ability_ru}\n"
                 f"**Атаки:** {format_moves(final_moves)}\n"
                 f"**ID:** `{mon['instance_id']}`\n"
                 f"**Место:** {place}"
@@ -302,7 +335,7 @@ class Admin(commands.Cog):
 
     @app_commands.command(
         name="gm_set_species",
-        description="[Мастер] Изменить вид покемона (например, при эволюции или сюжете)",
+        description="[Мастер] Изменить вид покемона (например, при эволюции)",
     )
     @app_commands.describe(user="Владелец", instance_id="ID покемона", species="Новый вид (имя или #номер)")
     @is_master()
@@ -403,6 +436,42 @@ class Admin(commands.Cog):
             return
         await interaction.response.send_message(
             f"✅ Пол покемона `{iid}` → **{gender.name}**.", ephemeral=True
+        )
+
+    # ------------------------------------------------------------------ /gm_set_ability
+
+    @app_commands.command(
+        name="gm_set_ability",
+        description="[Мастер] Изменить способность покемона",
+    )
+    @app_commands.describe(
+        user="Владелец",
+        instance_id="ID покемона",
+        ability="Способность (начните печатать — подскажу из доступных виду)",
+    )
+    @is_master()
+    @app_commands.autocomplete(instance_id=_instance_autocomplete, ability=_ability_autocomplete)
+    async def gm_set_ability(
+        self, interaction: discord.Interaction,
+        user: discord.Member, instance_id: str, ability: str,
+    ) -> None:
+        await interaction.response.defer(ephemeral=True)
+        iid = instance_id.strip().lower()
+        ability_en = ability.strip().lower().replace(" ", "-")
+
+        mon = await get_pokemon(user.id, iid)
+        if not mon:
+            await interaction.followup.send("❌ Покемон не найден.", ephemeral=True)
+            return
+
+        ok = await update_pokemon(user.id, iid, ability=ability_en)
+        if not ok:
+            await interaction.followup.send("❌ Не удалось обновить способность.", ephemeral=True)
+            return
+
+        ability_ru = await pokeapi_client.get_ability_ru(ability_en)
+        await interaction.followup.send(
+            f"✅ Способность покемона `{iid}` → **{ability_ru}**.", ephemeral=True
         )
 
     # ------------------------------------------------------------------ /give_money
