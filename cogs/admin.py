@@ -1,4 +1,4 @@
-"""Мастерские команды — выдача покемонов."""
+"""Мастерские команды — выдача покемонов и денег."""
 from __future__ import annotations
 
 import logging
@@ -11,7 +11,13 @@ from discord import app_commands
 from discord.ext import commands
 
 import pokeapi_client
-from database import MAX_PARTY_SIZE, add_pokemon, add_to_pokedex, get_trainer
+from database import (
+    MAX_PARTY_SIZE,
+    add_pokebucks,
+    add_pokemon,
+    add_to_pokedex,
+    get_trainer,
+)
 from pokeapi_client import PokeAPIError
 from utils import EMBED_COLOR, format_moves, load_species, mon_title
 
@@ -45,23 +51,50 @@ def is_master():
 
 
 # --------------------------------------------------------------------------- #
-#                              АВТОДОПОЛНЕНИЯ                                 #
+#                              АВТОДОПОЛНЕНИЕ                                 #
 # --------------------------------------------------------------------------- #
 
 async def _species_autocomplete(
     interaction: discord.Interaction, current: str
 ) -> list[app_commands.Choice[str]]:
-    """Подсказки по названиям покемонов, начиная с первых букв."""
+    """Подсказки по названиям покемонов. Работает и на русском, и на английском."""
     try:
-        index = await pokeapi_client.get_species_index()
+        index = await pokeapi_client.ensure_name_index()
     except PokeAPIError:
         return []
+
     cur = current.strip().lower().lstrip("#")
     out: list[app_commands.Choice[str]] = []
-    for sid, name in index:
-        if not cur or cur in name or cur == str(sid):
-            pretty = name.replace("-", " ").title()
-            out.append(app_commands.Choice(name=f"#{sid:04d} {pretty}", value=name))
+
+    # Популярные покемоны сверху — чтобы мастеру было удобно
+    POPULAR = [
+        ("пикачу", "Пикачу"),
+        ("чармандер", "Чармандер"),
+        ("чаризард", "Чаризард"),
+        ("бульбазавр", "Бульбазавр"),
+        ("сквиртл", "Сквиртл"),
+        ("иви", "Иви"),
+        ("мьюту", "Мьюту"),
+        ("джирачи", "Джирачи"),
+        ("лукарио", "Лукарио"),
+        ("гардевуар", "Гардевуар"),
+    ]
+    seen_ids: set[int] = set()
+    if not cur:
+        for key, label in POPULAR:
+            sid = index.get(key)
+            if sid and sid not in seen_ids:
+                out.append(app_commands.Choice(name=f"#{sid:04d} {label}", value=str(sid)))
+                seen_ids.add(sid)
+        if len(out) >= 25:
+            return out
+
+    for name, sid in index.items():
+        if sid in seen_ids:
+            continue
+        if not cur or cur in name:
+            out.append(app_commands.Choice(name=f"#{sid:04d} {name.title()}"[:100], value=str(sid)))
+            seen_ids.add(sid)
         if len(out) >= 25:
             break
     return out
@@ -77,6 +110,7 @@ class Admin(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
         self.give_pokemon.error(self._on_error)
+        self.give_money.error(self._on_error)
 
     async def _on_error(
         self, interaction: discord.Interaction, error: app_commands.AppCommandError
@@ -84,7 +118,7 @@ class Admin(commands.Cog):
         if isinstance(error, app_commands.CheckFailure):
             msg = "🚫 Эта команда только для мастеров игры."
         else:
-            log.exception("Ошибка в /give", exc_info=error)
+            log.exception("Ошибка в мастерской команде", exc_info=error)
             msg = "⚠️ Внутренняя ошибка. Смотрите логи."
         try:
             if interaction.response.is_done():
@@ -94,13 +128,15 @@ class Admin(commands.Cog):
         except discord.HTTPException:
             pass
 
+    # ------------------------------------------------------------------ GIVE POKEMON
+
     @app_commands.command(
         name="give",
         description="[Мастер] Выдать игроку покемона (в команду, если есть место, иначе в ПК)",
     )
     @app_commands.describe(
         user="Кому выдать покемона",
-        species="Вид: имя (pikachu) или номер (#25). Начните печатать — подскажу.",
+        species="Вид: имя (пикачу / Pikachu) или номер (#25). Начните печатать — подскажу.",
         level="Уровень (1–100, по умолчанию 5)",
         nickname="Кличка (необязательно)",
         moves="Атаки через запятую, 1–4 (не укажете — 4 случайные)",
@@ -118,21 +154,17 @@ class Admin(commands.Cog):
     ) -> None:
         await interaction.response.defer(ephemeral=True)
 
-        # 1. Резолвим вид покемона
         try:
             data = await pokeapi_client.get_pokemon_by_name(species)
         except PokeAPIError as e:
             await interaction.followup.send(
-                f"❌ Вид не найден: {e}\n"
-                f"Попробуйте английское имя (pikachu) или номер (#25).",
+                f"❌ {e}\nМожно вводить русское имя (Пикачу), английское (Pikachu) или номер (#25).",
                 ephemeral=True,
             )
             return
 
-        # 2. Пол — определяем по виду
         gender = await pokeapi_client.roll_gender(data["id"])
 
-        # 3. Атаки
         if moves:
             parsed = [
                 m.strip().lower().replace(" ", "-")
@@ -141,8 +173,7 @@ class Admin(commands.Cog):
             ]
             if not (1 <= len(parsed) <= 4):
                 await interaction.followup.send(
-                    "❌ Укажите от 1 до 4 атак через запятую. "
-                    "Пример: `thunderbolt, quick-attack`",
+                    "❌ Укажите от 1 до 4 атак через запятую. Пример: `thunderbolt, quick-attack`",
                     ephemeral=True,
                 )
                 return
@@ -150,7 +181,6 @@ class Admin(commands.Cog):
         else:
             final_moves = pokeapi_client.pick_random_moves(data, 4)
 
-        # 4. Кличка
         nick = (nickname or "").strip() or None
         if nick and len(nick) > 20:
             await interaction.followup.send(
@@ -158,12 +188,10 @@ class Admin(commands.Cog):
             )
             return
 
-        # 5. Определяем, куда положить: в команду (если есть место) или в ПК
         trainer = await get_trainer(user.id)
         has_party_slot = len(trainer["party"]) < MAX_PARTY_SIZE
         to_party = has_party_slot
 
-        # 6. Собираем и сохраняем
         mon = {
             "instance_id": uuid.uuid4().hex[:8],
             "species_id": data["id"],
@@ -175,7 +203,6 @@ class Admin(commands.Cog):
         added_to_party = await add_pokemon(user.id, mon, to_party=to_party)
         await add_to_pokedex(user.id, data["id"])
 
-        # 7. Отчёт мастеру
         species_data = await load_species([mon])
         title = mon_title(mon, species_data)
         place = "команду" if added_to_party else "ПК"
@@ -196,7 +223,6 @@ class Admin(commands.Cog):
             embed.set_thumbnail(url=data["artwork"])
         await interaction.followup.send(embed=embed, ephemeral=True)
 
-        # 8. Уведомление игроку в личку
         try:
             await user.send(
                 f"🎁 Мастер выдал вам **{title}** (Ур. {mon['level']})!\n"
@@ -204,6 +230,38 @@ class Admin(commands.Cog):
             )
         except discord.Forbidden:
             pass
+
+    # ------------------------------------------------------------------ GIVE MONEY
+
+    @app_commands.command(
+        name="give_money",
+        description="[Мастер] Выдать или забрать Pokébucks у игрока",
+    )
+    @app_commands.describe(
+        user="Кому выдать (или у кого забрать)",
+        amount="Сумма. Положительная — выдать, отрицательная — забрать.",
+    )
+    @is_master()
+    async def give_money(
+        self,
+        interaction: discord.Interaction,
+        user: discord.Member,
+        amount: int,
+    ) -> None:
+        uid = user.id
+        new_balance = await add_pokebucks(uid, int(amount))
+        sign = "+" if amount >= 0 else ""
+
+        embed = discord.Embed(
+            title="💰 Pokébucks обновлены",
+            description=(
+                f"**Игрок:** {user.mention}\n"
+                f"**Изменение:** {sign}{amount:,} PB\n"
+                f"**Текущий баланс:** {new_balance:,} PB"
+            ),
+            color=discord.Color.gold() if amount >= 0 else discord.Color.dark_red(),
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 async def setup(bot: commands.Bot) -> None:
