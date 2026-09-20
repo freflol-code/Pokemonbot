@@ -1,6 +1,4 @@
 """Асинхронный клиент PokéAPI с кэшированием, русскими именами и защитой от гонок."""
-from __future__ import annotations
-
 import asyncio
 import json
 import logging
@@ -27,6 +25,8 @@ _species_index_lock = asyncio.Lock()
 _name_index: dict[str, int] = {}
 _name_index_lock = asyncio.Lock()
 _name_index_ready = False
+
+_ability_names_ru: dict[str, str] = {}
 
 
 class PokeAPIError(Exception):
@@ -103,6 +103,16 @@ def _process_pokemon_raw(raw: dict[str, Any]) -> dict[str, Any]:
     artwork = ((sprites.get("other") or {}).get("official-artwork") or {}).get(
         "front_default"
     )
+    # Способности: только обычные (не скрытые), первая — основная
+    abilities = []
+    for a in raw.get("abilities", []) or []:
+        abilities.append({
+            "name": a["ability"]["name"],
+            "is_hidden": bool(a.get("is_hidden")),
+            "slot": int(a.get("slot", 1)),
+        })
+    abilities.sort(key=lambda x: x["slot"])
+
     return {
         "id": raw["id"],
         "species_id": _extract_species_id(raw, raw["id"]),
@@ -113,6 +123,7 @@ def _process_pokemon_raw(raw: dict[str, Any]) -> dict[str, Any]:
         "artwork": artwork or sprites.get("front_default"),
         "stats": {s["stat"]["name"]: s["base_stat"] for s in raw["stats"]},
         "moves": [m["move"]["name"] for m in raw["moves"]],
+        "abilities": abilities,
     }
 
 
@@ -121,7 +132,6 @@ def _process_pokemon_raw(raw: dict[str, Any]) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 
 async def _build_name_index() -> dict[str, int]:
-    """Скачивает все виды и собирает {имя: id} (русские + английские + номера)."""
     log.info("Генерация индекса имён покемонов (1–2 минуты)…")
     index: dict[str, int] = {}
     session = await _get_session()
@@ -171,7 +181,6 @@ async def _build_name_index() -> dict[str, int]:
 
 
 async def ensure_name_index() -> dict[str, int]:
-    """Ленивая загрузка. Кэшируется в файл NAME_INDEX_FILE."""
     global _name_index, _name_index_ready
     async with _name_index_lock:
         if _name_index_ready:
@@ -204,7 +213,6 @@ async def get_pokemon(pokemon_id: int) -> dict[str, Any]:
 
 
 async def get_pokemon_by_name(name_or_id: str) -> dict[str, Any]:
-    """Поиск по русскому/английскому имени или номеру."""
     query_raw = str(name_or_id).strip().lstrip("#").strip()
     if not query_raw:
         raise PokeAPIError("Пустой запрос")
@@ -272,9 +280,38 @@ def pick_random_moves(data: dict[str, Any], count: int = 4) -> list[str]:
     return random.sample(moves, min(count, len(moves)))
 
 
-async def get_wild_pokemon_for_location(encounters: list[int] | None) -> dict[str, Any]:
-    if encounters:
-        species_id = random.choice(encounters)
-    else:
-        species_id = random.randint(1, MAX_POKEMON_ID)
-    return await get_pokemon(species_id)
+def pick_random_ability(data: dict[str, Any]) -> Optional[str]:
+    """Возвращает английское имя одной случайной обычной способности.
+
+    Если у покемона только скрытые способности — берётся случайная из них.
+    Если нет способностей — None.
+    """
+    abilities = data.get("abilities") or []
+    if not abilities:
+        return None
+    normal = [a["name"] for a in abilities if not a["is_hidden"]]
+    if normal:
+        return random.choice(normal)
+    return random.choice([a["name"] for a in abilities])
+
+
+async def get_ability_ru(ability_name: str) -> str:
+    """Возвращает русское название способности. Кэширует результат."""
+    key = _normalize(ability_name)
+    if key in _ability_names_ru:
+        return _ability_names_ru[key]
+
+    try:
+        raw = await _fetch_json(f"{BASE_URL}/ability/{ability_name}")
+    except PokeAPIError:
+        return ability_name
+
+    ru_name = ability_name
+    for n in raw.get("names", []) or []:
+        lang = (n.get("language") or {}).get("name")
+        if lang == "ru":
+            ru_name = n.get("name") or ability_name
+            break
+
+    _ability_names_ru[key] = ru_name
+    return ru_name
