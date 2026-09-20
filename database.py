@@ -8,14 +8,13 @@ from typing import Any, Optional
 
 import aiosqlite
 
-from data.locations import START_LOCATION
-
 log = logging.getLogger(__name__)
 
 POKEBALL_KEY = "pokeball"
 POTION_KEY = "potion"
 START_POKEBUCKS = 500
 MAX_PARTY_SIZE = 6
+START_LOCATION = "hoshinori"
 DEFAULT_DB_PATH = "pokebot.db"
 
 _db: Optional[aiosqlite.Connection] = None
@@ -68,7 +67,6 @@ CREATE TABLE IF NOT EXISTS pokedex (
 # --------------------------------------------------------------------------- #
 
 async def connect(db_path: Optional[str] = None) -> None:
-    """Открывает SQLite, создаёт таблицы и включает внешние ключи."""
     global _db
     path = db_path or os.getenv("SQLITE_DB", DEFAULT_DB_PATH)
     _db = await aiosqlite.connect(path)
@@ -137,7 +135,6 @@ async def _ensure_trainer(user_id: int) -> None:
 # --------------------------------------------------------------------------- #
 
 async def get_trainer(user_id: int) -> dict[str, Any]:
-    """Возвращает словарь тренера в том же формате, что и раньше (совместимость)."""
     await _ensure_trainer(user_id)
     db = _conn()
 
@@ -189,7 +186,6 @@ async def set_location(user_id: int, location: str) -> None:
 
 
 async def add_pokebucks(user_id: int, amount: int) -> int:
-    """Прибавляет сумму (может быть отрицательной). Не уходит ниже 0."""
     await _ensure_trainer(user_id)
     db = _conn()
     async with db.execute(
@@ -206,7 +202,6 @@ async def add_pokebucks(user_id: int, amount: int) -> int:
 
 
 async def spend_pokebucks(user_id: int, cost: int) -> bool:
-    """Атомарно списывает деньги. False — если не хватает."""
     await _ensure_trainer(user_id)
     db = _conn()
     cursor = await db.execute(
@@ -243,7 +238,6 @@ async def inc_losses(user_id: int, amount: int = 1) -> None:
 async def add_pokemon(
     user_id: int, mon: dict[str, Any], to_party: bool = False
 ) -> bool:
-    """Добавляет покемона. Возвращает True, если он попал в команду."""
     await _ensure_trainer(user_id)
     db = _conn()
 
@@ -291,7 +285,6 @@ async def remove_pokemon(user_id: int, instance_id: str) -> bool:
 
 
 async def _reslot_party(user_id: int) -> None:
-    """Пересобирает слоты в команде (0, 1, 2, ...), чтобы не было дырок."""
     db = _conn()
     async with db.execute(
         "SELECT instance_id FROM pokemon WHERE user_id = ? AND in_party = 1 "
@@ -309,7 +302,6 @@ async def _reslot_party(user_id: int) -> None:
 async def move_pokemon(
     user_id: int, instance_id: str, to_party: bool
 ) -> tuple[bool, str]:
-    """Перемещает покемона между ПК и командой. Возвращает (успех, сообщение)."""
     db = _conn()
 
     async with db.execute(
@@ -351,7 +343,6 @@ async def move_pokemon(
 
 
 async def update_pokemon(user_id: int, instance_id: str, **fields: Any) -> bool:
-    """Обновляет поля покемона: nickname, level, gender, moves, species_id."""
     if not fields:
         return False
     if "moves" in fields and not isinstance(fields["moves"], str):
@@ -407,7 +398,6 @@ async def get_item_qty(user_id: int, item_key: str) -> int:
 
 
 async def take_item(user_id: int, item_key: str, qty: int = 1) -> bool:
-    """Списывает qty предметов. False, если не хватает."""
     db = _conn()
     cursor = await db.execute(
         "UPDATE inventory SET qty = qty - ? "
@@ -423,7 +413,6 @@ async def take_item(user_id: int, item_key: str, qty: int = 1) -> bool:
 # --------------------------------------------------------------------------- #
 
 async def add_to_pokedex(user_id: int, species_id: int) -> bool:
-    """True — вид добавлен впервые, False — уже был."""
     await _ensure_trainer(user_id)
     db = _conn()
     cursor = await db.execute(
@@ -439,7 +428,6 @@ async def add_to_pokedex(user_id: int, species_id: int) -> bool:
 # --------------------------------------------------------------------------- #
 
 async def reset_trainer(user_id: int) -> None:
-    """Полный сброс тренера к стартовому состоянию."""
     db = _conn()
     await db.execute("DELETE FROM pokemon   WHERE user_id = ?", (user_id,))
     await db.execute("DELETE FROM inventory WHERE user_id = ?", (user_id,))
