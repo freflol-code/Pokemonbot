@@ -7,13 +7,11 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from data.locations import LOCATIONS
 from database import add_item, get_item_qty, get_trainer, spend_pokebucks
 from utils import EMBED_COLOR
 
 # ==========================================================================
 #  КАТАЛОГ ПРЕДМЕТОВ
-#  Здесь описаны ВСЕ существующие предметы (ключ → имя и цена).
 # ==========================================================================
 ITEMS: dict[str, dict[str, object]] = {
     "pokeball":     {"name": "Покебол",     "price": 50},
@@ -24,23 +22,33 @@ ITEMS: dict[str, dict[str, object]] = {
 }
 
 # ==========================================================================
-#  СТАНДАРТНЫЙ АССОРТИМЕНТ
-#  Пока во всех магазинах один и тот же набор.
-#  Когда захочешь разные — замени на dict[location_key] -> list[item_key].
+#  ЛОКАЦИИ
+#  Ключ в UPPERCASE = имя переменной окружения SHOP_CHANNEL_<KEY>.
 # ==========================================================================
+LOCATION_NAMES: dict[str, str] = {
+    "hoshinori": "✨ Хошинори",
+    "lastoris":  "🌊 Ласторис",
+    "verden":    "🌿 Верден",
+    "kaiseki":   "🔥 Кайсеки",
+    "nordkron":  "❄️ Нордкрон",
+    "aurelis":   "⚡ Аурелис",
+    "hibiki":    "🎐 Хибики",
+    "kurokane":  "⚙️ Курокане",
+    "lumier":    "💫 Люмьер",
+    "estera":    "🔮 Эстера",
+    "reigard":   "🐉 Рейгард",
+    "eidolon":   "👻 Эйдолон",
+}
+
+# Пока у всех магазинов один и тот же набор
 STANDARD_STOCK: list[str] = ["pokeball", "greatball", "potion", "super_potion", "revive"]
 
 
 def _load_shop_channels() -> dict[int, str]:
-    """Читает переменные SHOP_CHANNEL_<LOCATION> из окружения.
-
-    Возвращает {channel_id: location_key}.
-    location_key — ключ из LOCATIONS (hoshinori, lastoris, ...).
-    """
+    """{channel_id: location_key} — из переменных SHOP_CHANNEL_<KEY>."""
     mapping: dict[int, str] = {}
-    for loc_key in LOCATIONS.keys():
-        env_name = f"SHOP_CHANNEL_{loc_key.upper()}"
-        raw = os.getenv(env_name, "").strip()
+    for loc_key in LOCATION_NAMES.keys():
+        raw = os.getenv(f"SHOP_CHANNEL_{loc_key.upper()}", "").strip()
         if not raw:
             continue
         try:
@@ -50,19 +58,16 @@ def _load_shop_channels() -> dict[int, str]:
     return mapping
 
 
-# Считается один раз при импорте модуля
 SHOP_CHANNELS: dict[int, str] = _load_shop_channels()
 
 
 def _location_by_channel(channel_id: int) -> str | None:
-    """Возвращает ключ локации или None, если канал не магазинный."""
     return SHOP_CHANNELS.get(channel_id)
 
 
 async def _shop_autocomplete(
     interaction: discord.Interaction, current: str
 ) -> list[app_commands.Choice[str]]:
-    """Показывает стандартный набор (позже — набор текущей локации)."""
     cur = current.strip().lower()
     out: list[app_commands.Choice[str]] = []
     for key in STANDARD_STOCK:
@@ -98,11 +103,11 @@ class Inventory(commands.Cog):
         embed.set_footer(text=f"Баланс: {t['pokebucks']:,} Pokébucks")
         await interaction.response.send_message(embed=embed)
 
-    @app_commands.command(name="shop", description="Магазин (работает только в каналах магазинов)")
-    @app_commands.describe(
-        item="Что купить",
-        quantity="Сколько (1–99)",
+    @app_commands.command(
+        name="shop",
+        description="Магазин (работает только в каналах магазинов)",
     )
+    @app_commands.describe(item="Что купить", quantity="Сколько (1–99)")
     @app_commands.autocomplete(item=_shop_autocomplete)
     async def shop(
         self,
@@ -110,7 +115,6 @@ class Inventory(commands.Cog):
         item: str,
         quantity: app_commands.Range[int, 1, 99] = 1,
     ) -> None:
-        # 1. Проверяем, что команда вызвана в канале магазина
         loc_key = _location_by_channel(interaction.channel_id or 0)
         if loc_key is None:
             await interaction.response.send_message(
@@ -119,10 +123,8 @@ class Inventory(commands.Cog):
             )
             return
 
-        loc = LOCATIONS.get(loc_key, {})
-        loc_name = f"{loc.get('emoji', '🏪')} {loc.get('name', loc_key)}"
+        loc_name = LOCATION_NAMES.get(loc_key, loc_key)
 
-        # 2. Проверяем, что предмет есть в каталоге
         key = item.strip().lower()
         if key not in ITEMS:
             await interaction.response.send_message(
@@ -130,7 +132,6 @@ class Inventory(commands.Cog):
             )
             return
 
-        # 3. Пока во всех магазинах стандартный набор. Позже — свой для каждой локации.
         if key not in STANDARD_STOCK:
             await interaction.response.send_message(
                 "❌ Этот предмет здесь не продаётся.", ephemeral=True
@@ -140,7 +141,6 @@ class Inventory(commands.Cog):
         info = ITEMS[key]
         total = int(info["price"]) * quantity
 
-        # 4. Списываем Pokébucks атомарно
         uid = interaction.user.id
         t_before = await get_trainer(uid)
         paid = await spend_pokebucks(uid, total)
@@ -152,7 +152,6 @@ class Inventory(commands.Cog):
             )
             return
 
-        # 5. Начисляем предмет
         await add_item(uid, key, quantity)
 
         t_after = await get_trainer(uid)
