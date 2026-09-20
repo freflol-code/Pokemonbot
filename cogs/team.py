@@ -1,6 +1,4 @@
 """Команда, ПК, перемещение покемонов и клички."""
-from __future__ import annotations
-
 import math
 from typing import Any
 
@@ -17,7 +15,9 @@ from database import (
 )
 from utils import (
     EMBED_COLOR,
+    format_ability,
     format_moves,
+    load_abilities_ru,
     load_species,
     mon_title,
 )
@@ -65,11 +65,16 @@ class PCView(discord.ui.View):
     async def build_embed(self) -> discord.Embed:
         chunk = self.pc[self.page * PC_PER_PAGE : (self.page + 1) * PC_PER_PAGE]
         species = await load_species(chunk)
+        abilities_ru = await load_abilities_ru(chunk)
         start = self.page * PC_PER_PAGE
-        lines = [
-            f"`{start + i}.` **{mon_title(m, species)}** • Ур. {m['level']} • ID: `{m['instance_id']}`"
-            for i, m in enumerate(chunk, 1)
-        ]
+        lines = []
+        for i, m in enumerate(chunk, 1):
+            ability_en = m.get("ability")
+            ability = abilities_ru.get(ability_en) if ability_en else "—"
+            lines.append(
+                f"`{start + i}.` **{mon_title(m, species)}** • Ур. {m['level']} • "
+                f"Способность: {ability} • ID: `{m['instance_id']}`"
+            )
         embed = discord.Embed(
             title=f"🖥️ ПК ({len(self.pc)} покемонов)",
             description="\n".join(lines) if lines else "ПК пуст.",
@@ -133,11 +138,15 @@ class Team(commands.Cog):
         if not party:
             embed.description = "Команда пуста. Добавьте покемона: /team_add"
         species = await load_species(party)
+        abilities_ru = await load_abilities_ru(party)
         for i, m in enumerate(party, 1):
+            ability_en = m.get("ability")
+            ability = abilities_ru.get(ability_en) if ability_en else "—"
             embed.add_field(
                 name=f"{i}. {mon_title(m, species)}",
                 value=(
                     f"Ур. **{m['level']}**\n"
+                    f"Способность: **{ability}**\n"
                     f"Атаки: {format_moves(m['moves'])}\n"
                     f"ID: `{m['instance_id']}`"
                 ),
@@ -169,7 +178,6 @@ class Team(commands.Cog):
         uid = interaction.user.id
         trainer = await get_trainer(uid)
 
-        # Ранний отказ, чтобы не дёргать БД дважды
         if not any(m["instance_id"] == iid for m in trainer["pc"]):
             if any(m["instance_id"] == iid for m in trainer["party"]):
                 msg = "Этот покемон уже в команде."
