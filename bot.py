@@ -1,6 +1,4 @@
 """Точка входа: запуск бота, загрузка cog'ов и синхронизация слэш-команд."""
-from __future__ import annotations
-
 import logging
 import os
 import sys
@@ -41,8 +39,8 @@ class PokeBot(commands.Bot):
 
     # --- Запуск и загрузка cog'ов -------------------------------------------
     async def setup_hook(self) -> None:
-        # SQLite инициализируется здесь. Путь: SQLITE_DB из .env или pokebot.db
-        await database.connect(os.getenv("SQLITE_DB", "pokebot.db"))
+        # PostgreSQL (Supabase) — DATABASE_URL из .env или переменных Bothost
+        await database.connect(os.getenv("DATABASE_URL"))
 
         for ext in EXTENSIONS:
             try:
@@ -125,10 +123,10 @@ class PokeBot(commands.Bot):
 
 def _check_env() -> None:
     """Проверяет наличие обязательных переменных окружения."""
-    missing = [k for k in ("DISCORD_TOKEN",) if not os.getenv(k)]
+    missing = [k for k in ("DISCORD_TOKEN", "DATABASE_URL") if not os.getenv(k)]
     if missing:
         print(
-            "❌ Заполните переменные окружения в файле .env: " + ", ".join(missing),
+            "❌ Заполните переменные окружения: " + ", ".join(missing),
             file=sys.stderr,
         )
         raise SystemExit(1)
