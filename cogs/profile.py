@@ -1,8 +1,11 @@
 """Профиль тренера и баланс."""
+from __future__ import annotations
+
 import discord
 from discord import app_commands
 from discord.ext import commands
 
+from data.locations import location_title
 from database import get_trainer
 from utils import EMBED_COLOR
 
@@ -15,9 +18,15 @@ class Profile(commands.Cog):
     async def profile(self, interaction: discord.Interaction) -> None:
         t = await get_trainer(interaction.user.id)
         embed = discord.Embed(
-            title=f"Профиль тренера {interaction.user.display_name}", color=EMBED_COLOR
+            title=f"Профиль тренера {interaction.user.display_name}",
+            color=EMBED_COLOR,
         )
         embed.set_thumbnail(url=interaction.user.display_avatar.url)
+        embed.add_field(
+            name="📍 Локация",
+            value=location_title(t.get("location")),
+            inline=False,
+        )
         embed.add_field(name="🏆 Победы", value=str(t["wins"]))
         embed.add_field(name="💔 Поражения", value=str(t["losses"]))
         embed.add_field(name="💰 Pokébucks", value=f"{t['pokebucks']:,}")
