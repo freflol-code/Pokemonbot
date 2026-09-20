@@ -25,6 +25,7 @@ EXTENSIONS = [
     "cogs.inventory",
     "cogs.pokedex",
     "cogs.admin",
+    "cogs.dice",
 ]
 
 
