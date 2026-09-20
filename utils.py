@@ -1,6 +1,4 @@
 """Общие вспомогательные функции для форматирования."""
-from __future__ import annotations
-
 import asyncio
 from typing import Any, Iterable
 
@@ -10,7 +8,6 @@ import pokeapi_client
 
 EMBED_COLOR = discord.Color.from_rgb(230, 57, 70)
 
-# Эмодзи пола; всегда возвращаем строку, чтобы не подставлять None в f-строку
 GENDER_EMOJI: dict[str, str] = {
     "male": "♂️",
     "female": "♀️",
@@ -30,12 +27,7 @@ TYPE_RU: dict[str, str] = {
 async def load_species(
     items: Iterable[dict[str, Any] | int],
 ) -> dict[int, dict[str, Any]]:
-    """Параллельно загружает данные видов; недоступные виды пропускаются.
-
-    Принимает список покемонов (dict с полем species_id) или список ID.
-    Возвращает {species_id: data}. Если PokéAPI не ответил для какого-то вида,
-    он просто не попадёт в результат — вызывающий код должен это учитывать.
-    """
+    """Параллельно загружает данные видов; недоступные виды пропускаются."""
     ids: set[int] = set()
     for item in items:
         if item is None:
@@ -69,10 +61,43 @@ def species_name(species: dict[int, dict[str, Any]], species_id: int) -> str:
 
 
 def format_gender(gender: str | None) -> str:
-    """Возвращает эмодзи пола или пустую строку, если пол неизвестен."""
     if not gender:
         return ""
     return GENDER_EMOJI.get(str(gender), "")
+
+
+def format_ability(ability_en: str | None) -> str:
+    """Красивое отображение способности (без перевода — перевод асинхронный).
+
+    'flash-fire' → 'Flash Fire'. Если способности нет — '—'.
+    """
+    if not ability_en:
+        return "—"
+    return str(ability_en).replace("-", " ").title()
+
+
+async def load_abilities_ru(items: Iterable[dict[str, Any]]) -> dict[str, str]:
+    """Асинхронно подтягивает русские названия для всех уникальных способностей.
+
+    Возвращает {английское_имя: русское_имя}.
+    """
+    names: set[str] = set()
+    for mon in items:
+        ab = mon.get("ability") if isinstance(mon, dict) else None
+        if ab:
+            names.add(ab)
+
+    if not names:
+        return {}
+
+    results = await asyncio.gather(
+        *(pokeapi_client.get_ability_ru(n) for n in names),
+        return_exceptions=True,
+    )
+    out: dict[str, str] = {}
+    for name, ru in zip(names, results):
+        out[name] = ru if isinstance(ru, str) else name
+    return out
 
 
 def mon_title(mon: dict[str, Any], species: dict[int, dict[str, Any]]) -> str:
