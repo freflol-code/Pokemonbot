@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS pokemon (
     level       INTEGER NOT NULL DEFAULT 5,
     gender      TEXT    NOT NULL DEFAULT 'genderless',
     moves       TEXT    NOT NULL DEFAULT '[]',
+    ability     TEXT,
     in_party    INTEGER NOT NULL DEFAULT 0,
     slot        INTEGER
 );
@@ -55,6 +56,11 @@ CREATE TABLE IF NOT EXISTS pokedex (
 );
 """
 
+# Миграция для уже существующих баз — добавляет столбец ability, если его нет
+MIGRATION = """
+ALTER TABLE pokemon ADD COLUMN IF NOT EXISTS ability TEXT;
+"""
+
 
 async def connect(database_url: Optional[str] = None) -> None:
     global _pool
@@ -71,6 +77,7 @@ async def connect(database_url: Optional[str] = None) -> None:
     )
     async with _pool.acquire() as conn:
         await conn.execute(SCHEMA)
+        await conn.execute(MIGRATION)
     log.info("PostgreSQL подключён (Supabase)")
 
 
@@ -110,6 +117,7 @@ def _pokemon_dict(row: asyncpg.Record) -> dict[str, Any]:
         "level": row["level"],
         "gender": row["gender"],
         "moves": moves,
+        "ability": row["ability"],
     }
 
 
@@ -226,11 +234,13 @@ async def add_pokemon(user_id: int, mon: dict[str, Any], to_party: bool = False)
         moves_json = json.dumps(mon.get("moves", []), ensure_ascii=False)
         await conn.execute(
             "INSERT INTO pokemon "
-            "(instance_id, user_id, species_id, nickname, level, gender, moves, in_party, slot) "
-            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+            "(instance_id, user_id, species_id, nickname, level, gender, moves, ability, in_party, slot) "
+            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
             mon["instance_id"], user_id, int(mon["species_id"]),
             mon.get("nickname"), int(mon.get("level", 5)),
-            mon.get("gender", "genderless"), moves_json, in_party, slot,
+            mon.get("gender", "genderless"), moves_json,
+            mon.get("ability"),
+            in_party, slot,
         )
     return bool(in_party)
 
@@ -299,7 +309,7 @@ async def update_pokemon(user_id: int, instance_id: str, **fields: Any) -> bool:
         return False
     if "moves" in fields and not isinstance(fields["moves"], str):
         fields["moves"] = json.dumps(fields["moves"], ensure_ascii=False)
-    allowed = {"nickname", "level", "gender", "moves", "species_id"}
+    allowed = {"nickname", "level", "gender", "moves", "species_id", "ability"}
     update_fields = {k: v for k, v in fields.items() if k in allowed}
     if not update_fields:
         return False
