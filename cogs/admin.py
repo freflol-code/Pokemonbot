@@ -113,7 +113,9 @@ async def _instance_autocomplete(
     for where, mon in (
         [("К", m) for m in t["party"]] + [("П", m) for m in t["pc"]]
     ):
-        label = f"[{where}] {mon.get('nickname') or f'#{mon['species_id']}'} • Ур.{mon['level']} • {mon['instance_id']}"
+        sid = mon["species_id"]
+        nick_part = mon.get("nickname") or f"#{sid}"
+        label = f"[{where}] {nick_part} • Ур.{mon['level']} • {mon['instance_id']}"
         if not cur or cur in mon["instance_id"] or cur in label.lower():
             out.append(app_commands.Choice(name=label[:100], value=mon["instance_id"]))
         if len(out) >= 25:
