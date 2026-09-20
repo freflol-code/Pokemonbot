@@ -21,20 +21,18 @@ logging.basicConfig(
 )
 log = logging.getLogger("pokebot")
 
-# --- Список модулей для загрузки ---
 EXTENSIONS = [
     "cogs.profile",
     "cogs.team",
     "cogs.inventory",
     "cogs.pokedex",
     "cogs.admin",
+    "cogs.travel",
 ]
 
 
 class PokeBot(commands.Bot):
     def __init__(self) -> None:
-        # Слэш-команды не требуют привилегированных интентов.
-        # Префикс оставлен на будущее, если захотите текстовые команды.
         super().__init__(
             command_prefix=commands.when_mentioned_or("!"),
             intents=discord.Intents.default(),
@@ -44,12 +42,9 @@ class PokeBot(commands.Bot):
 
     # --- Запуск и загрузка cog'ов -------------------------------------------
     async def setup_hook(self) -> None:
-        # 1. MongoDB
-        await database.connect(
-            os.environ["MONGODB_URI"], os.getenv("MONGODB_DB", "pokebot")
-        )
+        # SQLite инициализируется здесь. Путь: SQLITE_DB из .env или pokebot.db
+        await database.connect(os.getenv("SQLITE_DB", "pokebot.db"))
 
-        # 2. Cog'и
         for ext in EXTENSIONS:
             try:
                 await self.load_extension(ext)
@@ -58,7 +53,6 @@ class PokeBot(commands.Bot):
                 log.exception("Не удалось загрузить %s", ext)
                 raise
 
-        # 3. Синхронизация команд
         guild_id = os.getenv("GUILD_ID", "").strip()
         try:
             if guild_id:
@@ -66,15 +60,13 @@ class PokeBot(commands.Bot):
                 self.tree.copy_global_to(guild=guild)
                 synced = await self.tree.sync(guild=guild)
                 log.info(
-                    "Синхронизировано %d команд на сервере %s",
-                    len(synced), guild_id,
+                    "Синхронизировано %d команд на сервере %s", len(synced), guild_id
                 )
             else:
                 synced = await self.tree.sync()
                 log.info(
                     "Глобально синхронизировано %d команд "
-                    "(появление может занять до часа; укажите GUILD_ID в .env "
-                    "для мгновенной синхронизации)",
+                    "(появление может занять до часа; укажите GUILD_ID в .env для мгновенной синхронизации)",
                     len(synced),
                 )
         except discord.HTTPException:
@@ -89,7 +81,7 @@ class PokeBot(commands.Bot):
         try:
             await pokeapi_client.close()
         finally:
-            database.close()
+            await database.close()
             await super().close()
 
     # --- Логирование вызовов ------------------------------------------------
@@ -134,11 +126,10 @@ class PokeBot(commands.Bot):
 
 def _check_env() -> None:
     """Проверяет наличие обязательных переменных окружения."""
-    missing = [k for k in ("DISCORD_TOKEN", "MONGODB_URI") if not os.getenv(k)]
+    missing = [k for k in ("DISCORD_TOKEN",) if not os.getenv(k)]
     if missing:
         print(
-            "❌ Заполните переменные окружения в файле .env: "
-            + ", ".join(missing),
+            "❌ Заполните переменные окружения в файле .env: " + ", ".join(missing),
             file=sys.stderr,
         )
         raise SystemExit(1)
