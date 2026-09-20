@@ -8,10 +8,15 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from database import MAX_PARTY_SIZE, get_trainer, update_trainer
+from database import (
+    MAX_PARTY_SIZE,
+    get_pokemon,
+    get_trainer,
+    move_pokemon,
+    update_pokemon,
+)
 from utils import (
     EMBED_COLOR,
-    GENDER_EMOJI,
     format_moves,
     load_species,
     mon_title,
@@ -20,19 +25,26 @@ from utils import (
 PC_PER_PAGE = 10
 
 
-def _mon_choices(trainer: dict[str, Any], sources: tuple[str, ...], current: str):
-    out = []
+def _mon_choices(
+    trainer: dict[str, Any], sources: tuple[str, ...], current: str
+) -> list[app_commands.Choice[str]]:
+    out: list[app_commands.Choice[str]] = []
+    cur = current.strip().lower()
     for src in sources:
-        for m in trainer[src]:
+        for m in trainer.get(src, []):
             nick = m.get("nickname") or f"Покемон #{m['species_id']}"
             label = f"{nick} • Ур.{m['level']} • {m['instance_id']}"
-            if current.lower() in label.lower():
-                out.append(app_commands.Choice(name=label[:100], value=m["instance_id"]))
-    return out[:25]
+            if not cur or cur in label.lower() or cur in m["instance_id"]:
+                out.append(
+                    app_commands.Choice(name=label[:100], value=m["instance_id"])
+                )
+            if len(out) >= 25:
+                return out
+    return out
 
 
 class PCView(discord.ui.View):
-    """Пагинация по ПК."""
+    """Пагинация ПК по 10 покемонов на страницу."""
 
     def __init__(self, owner_id: int, pc: list[dict[str, Any]]) -> None:
         super().__init__(timeout=120)
@@ -77,15 +89,21 @@ class PCView(discord.ui.View):
     async def _refresh(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer()
         self._update_buttons()
-        await interaction.edit_original_response(embed=await self.build_embed(), view=self)
+        await interaction.edit_original_response(
+            embed=await self.build_embed(), view=self
+        )
 
     @discord.ui.button(label="◀", style=discord.ButtonStyle.secondary)
-    async def prev_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def prev_button(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
         self.page -= 1
         await self._refresh(interaction)
 
     @discord.ui.button(label="▶", style=discord.ButtonStyle.secondary)
-    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def next_button(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
         self.page += 1
         await self._refresh(interaction)
 
@@ -136,70 +154,59 @@ class Team(commands.Cog):
         if view.total_pages == 1:
             await interaction.followup.send(embed=embed)
         else:
-            view.message = await interaction.followup.send(embed=embed, view=view, wait=True)
+            view.message = await interaction.followup.send(
+                embed=embed, view=view, wait=True
+            )
 
-    @app_commands.command(name="team_add", description="Переместить покемона из ПК в команду")
+    @app_commands.command(
+        name="team_add", description="Переместить покемона из ПК в команду"
+    )
     @app_commands.describe(instance_id="ID покемона (см. /pc)")
-    async def team_add(self, interaction: discord.Interaction, instance_id: str) -> None:
+    async def team_add(
+        self, interaction: discord.Interaction, instance_id: str
+    ) -> None:
         iid = instance_id.strip().lower()
         uid = interaction.user.id
-        t = await get_trainer(uid)
-        mon = next((m for m in t["pc"] if m["instance_id"] == iid), None)
-        if mon is None:
-            if any(m["instance_id"] == iid for m in t["party"]):
+        trainer = await get_trainer(uid)
+
+        # Ранний отказ, чтобы не дёргать БД дважды
+        if not any(m["instance_id"] == iid for m in trainer["pc"]):
+            if any(m["instance_id"] == iid for m in trainer["party"]):
                 msg = "Этот покемон уже в команде."
             else:
                 msg = "Покемон с таким ID не найден в ПК."
             await interaction.response.send_message(f"❌ {msg}", ephemeral=True)
             return
-        if len(t["party"]) >= MAX_PARTY_SIZE:
-            await interaction.response.send_message(
-                f"❌ Команда заполнена ({MAX_PARTY_SIZE}/{MAX_PARTY_SIZE}). Сначала уберите кого-нибудь: /team_remove",
-                ephemeral=True,
-            )
+
+        ok, reason = await move_pokemon(uid, iid, to_party=True)
+        if not ok:
+            await interaction.response.send_message(f"❌ {reason}", ephemeral=True)
             return
 
-        res = await update_trainer(
-            uid,
-            {"$pull": {"pc": {"instance_id": iid}}, "$push": {"party": mon}},
-            {"pc.instance_id": iid, f"party.{MAX_PARTY_SIZE - 1}": {"$exists": False}},
-        )
-        if res.matched_count == 0:
-            await interaction.response.send_message(
-                "⚠️ Данные изменились, повторите команду.", ephemeral=True
-            )
-            return
-        species = await load_species([mon])
-        await interaction.response.send_message(
-            f"✅ **{mon_title(mon, species)}** теперь в команде!"
-        )
+        mon = await get_pokemon(uid, iid)
+        species = await load_species([mon]) if mon else {}
+        title = mon_title(mon, species) if mon else iid
+        await interaction.response.send_message(f"✅ **{title}** теперь в команде!")
 
-    @app_commands.command(name="team_remove", description="Переместить покемона из команды в ПК")
+    @app_commands.command(
+        name="team_remove", description="Переместить покемона из команды в ПК"
+    )
     @app_commands.describe(instance_id="ID покемона (см. /party)")
-    async def team_remove(self, interaction: discord.Interaction, instance_id: str) -> None:
+    async def team_remove(
+        self, interaction: discord.Interaction, instance_id: str
+    ) -> None:
         iid = instance_id.strip().lower()
         uid = interaction.user.id
-        t = await get_trainer(uid)
-        mon = next((m for m in t["party"] if m["instance_id"] == iid), None)
-        if mon is None:
-            await interaction.response.send_message(
-                "❌ Покемон с таким ID не найден в команде.", ephemeral=True
-            )
+
+        ok, reason = await move_pokemon(uid, iid, to_party=False)
+        if not ok:
+            await interaction.response.send_message(f"❌ {reason}", ephemeral=True)
             return
-        res = await update_trainer(
-            uid,
-            {"$pull": {"party": {"instance_id": iid}}, "$push": {"pc": mon}},
-            {"party.instance_id": iid},
-        )
-        if res.matched_count == 0:
-            await interaction.response.send_message(
-                "⚠️ Данные изменились, повторите команду.", ephemeral=True
-            )
-            return
-        species = await load_species([mon])
-        await interaction.response.send_message(
-            f"✅ **{mon_title(mon, species)}** отправлен в ПК."
-        )
+
+        mon = await get_pokemon(uid, iid)
+        species = await load_species([mon]) if mon else {}
+        title = mon_title(mon, species) if mon else iid
+        await interaction.response.send_message(f"✅ **{title}** отправлен в ПК.")
 
     @app_commands.command(name="setnick", description="Задать кличку покемону")
     @app_commands.describe(
@@ -218,25 +225,21 @@ class Team(commands.Cog):
             return
         new_value = None if nick in ("", "-") else nick
 
-        for field in ("party", "pc"):
-            res = await update_trainer(
-                interaction.user.id,
-                {"$set": {f"{field}.$.nickname": new_value}},
-                {f"{field}.instance_id": iid},
+        ok = await update_pokemon(interaction.user.id, iid, nickname=new_value)
+        if not ok:
+            await interaction.response.send_message(
+                "❌ Покемон с таким ID не найден.", ephemeral=True
             )
-            if res.matched_count:
-                text = (
-                    f"✅ Кличка сброшена."
-                    if new_value is None
-                    else f"✅ Кличка установлена: **{discord.utils.escape_markdown(new_value)}**"
-                )
-                await interaction.response.send_message(text)
-                return
-        await interaction.response.send_message(
-            "❌ Покемон с таким ID не найден.", ephemeral=True
-        )
+            return
 
-    # --- автодополнение ID ---
+        if new_value is None:
+            await interaction.response.send_message("✅ Кличка сброшена.")
+        else:
+            await interaction.response.send_message(
+                f"✅ Кличка установлена: **{discord.utils.escape_markdown(new_value)}**"
+            )
+
+    # --- автодополнение ID ------------------------------------------------
     @team_add.autocomplete("instance_id")
     async def _ac_add(self, interaction: discord.Interaction, current: str):
         t = await get_trainer(interaction.user.id)
