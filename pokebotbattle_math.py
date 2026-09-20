@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import random
-import battle_math
 from typing import Optional
 
 # ==========================================================================
