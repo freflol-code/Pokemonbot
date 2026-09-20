@@ -1,6 +1,4 @@
 """Мастерские команды — выдача покемонов, денег, побед/поражений."""
-from __future__ import annotations
-
 import logging
 import os
 import uuid
@@ -26,10 +24,6 @@ from utils import EMBED_COLOR, format_moves, load_species, mon_title
 log = logging.getLogger(__name__)
 
 
-# --------------------------------------------------------------------------- #
-#                              ПРОВЕРКА ПРАВ                                  #
-# --------------------------------------------------------------------------- #
-
 def _master_role_id() -> int:
     raw = os.getenv("MASTER_ROLE_ID", "").strip()
     try:
@@ -52,25 +46,19 @@ def is_master():
     return app_commands.check(predicate)
 
 
-# --------------------------------------------------------------------------- #
-#                              АВТОДОПОЛНЕНИЕ                                 #
-# --------------------------------------------------------------------------- #
-
 async def _species_autocomplete(
     interaction: discord.Interaction, current: str
-) -> list[app_commands.Choice[str]]:
-    """Подсказки по названиям покемонов. Работает и на русском, и на английском."""
+):
     try:
         index = await pokeapi_client.ensure_name_index()
     except PokeAPIError:
         return []
     except AttributeError:
-        # старая версия pokeapi_client — не роняем бота
         log.exception("pokeapi_client без ensure_name_index — пересоберите проект")
         return []
 
     cur = current.strip().lower().lstrip("#")
-    out: list[app_commands.Choice[str]] = []
+    out = []
 
     POPULAR = [
         ("пикачу", "Пикачу"),
@@ -84,7 +72,7 @@ async def _species_autocomplete(
         ("лукарио", "Лукарио"),
         ("гардевуар", "Гардевуар"),
     ]
-    seen_ids: set[int] = set()
+    seen_ids = set()
     if not cur:
         for key, label in POPULAR:
             sid = index.get(key)
@@ -111,17 +99,12 @@ async def _species_autocomplete(
     return out
 
 
-# --------------------------------------------------------------------------- #
-#                                  COG                                        #
-# --------------------------------------------------------------------------- #
-
 class Admin(commands.Cog):
     """Команды для мастеров игры."""
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
 
-    # Автоматически вызывается для всех команд этого кога при ошибке
     async def cog_app_command_error(
         self,
         interaction: discord.Interaction,
@@ -139,8 +122,6 @@ class Admin(commands.Cog):
                 await interaction.response.send_message(msg, ephemeral=True)
         except discord.HTTPException:
             pass
-
-    # ------------------------------------------------------------------ GIVE POKEMON
 
     @app_commands.command(
         name="give",
@@ -201,8 +182,7 @@ class Admin(commands.Cog):
             return
 
         trainer = await get_trainer(user.id)
-        has_party_slot = len(trainer["party"]) < MAX_PARTY_SIZE
-        to_party = has_party_slot
+        to_party = len(trainer["party"]) < MAX_PARTY_SIZE
 
         mon = {
             "instance_id": uuid.uuid4().hex[:8],
@@ -243,8 +223,6 @@ class Admin(commands.Cog):
         except discord.Forbidden:
             pass
 
-    # ------------------------------------------------------------------ GIVE MONEY
-
     @app_commands.command(
         name="give_money",
         description="[Мастер] Выдать или забрать Pokébucks у игрока",
@@ -272,8 +250,6 @@ class Admin(commands.Cog):
             color=discord.Color.gold() if amount >= 0 else discord.Color.dark_red(),
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    # ------------------------------------------------------------------ WINS / LOSSES
 
     @app_commands.command(
         name="gm_win",
