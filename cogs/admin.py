@@ -23,6 +23,12 @@ from utils import EMBED_COLOR, format_moves, load_species, mon_title
 
 log = logging.getLogger(__name__)
 
+GENDER_CHOICES = [
+    app_commands.Choice(name="♂️ Самец", value="male"),
+    app_commands.Choice(name="♀️ Самка", value="female"),
+    app_commands.Choice(name="⚪ Бесполый", value="genderless"),
+]
+
 
 def _master_role_id() -> int:
     raw = os.getenv("MASTER_ROLE_ID", "").strip()
@@ -131,9 +137,11 @@ class Admin(commands.Cog):
         user="Кому выдать покемона",
         species="Вид: имя (пикачу / Pikachu) или номер (#25). Начните печатать — подскажу.",
         level="Уровень (1–100, по умолчанию 5)",
+        gender="Пол покемона. Не укажете — определится случайно по виду.",
         nickname="Кличка (необязательно)",
         moves="Атаки через запятую, 1–4 (не укажете — 4 случайные)",
     )
+    @app_commands.choices(gender=GENDER_CHOICES)
     @is_master()
     @app_commands.autocomplete(species=_species_autocomplete)
     async def give_pokemon(
@@ -142,6 +150,7 @@ class Admin(commands.Cog):
         user: discord.Member,
         species: str,
         level: app_commands.Range[int, 1, 100] = 5,
+        gender: Optional[app_commands.Choice[str]] = None,
         nickname: Optional[str] = None,
         moves: Optional[str] = None,
     ) -> None:
@@ -156,7 +165,13 @@ class Admin(commands.Cog):
             )
             return
 
-        gender = await pokeapi_client.roll_gender(data["id"])
+        # Пол: если мастер указал — берём его, иначе случайно по виду
+        if gender is not None:
+            mon_gender = gender.value
+            gender_source = "задан мастером"
+        else:
+            mon_gender = await pokeapi_client.roll_gender(data["id"])
+            gender_source = "случайный"
 
         if moves:
             parsed = [
@@ -189,7 +204,7 @@ class Admin(commands.Cog):
             "species_id": data["id"],
             "nickname": nick,
             "level": int(level),
-            "gender": gender,
+            "gender": mon_gender,
             "moves": final_moves,
         }
         added_to_party = await add_pokemon(user.id, mon, to_party=to_party)
@@ -205,6 +220,7 @@ class Admin(commands.Cog):
                 f"**Игрок:** {user.mention}\n"
                 f"**Покемон:** {title}\n"
                 f"**Уровень:** {mon['level']}\n"
+                f"**Пол:** {mon_gender} ({gender_source})\n"
                 f"**Атаки:** {format_moves(final_moves)}\n"
                 f"**ID:** `{mon['instance_id']}`\n"
                 f"**Место:** {place}"
