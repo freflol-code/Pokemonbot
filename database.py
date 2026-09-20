@@ -1,12 +1,10 @@
-"""Асинхронная БД на SQLite для Pokébot."""
-from __future__ import annotations
-
+"""Асинхронная БД на PostgreSQL (Supabase) для Pokébot."""
 import json
 import logging
 import os
 from typing import Any, Optional
 
-import aiosqlite
+import asyncpg
 
 log = logging.getLogger(__name__)
 
@@ -15,14 +13,13 @@ POTION_KEY = "potion"
 START_POKEBUCKS = 500
 MAX_PARTY_SIZE = 6
 START_LOCATION = "hoshinori"
-DEFAULT_DB_PATH = "pokebot.db"
 
-_db: Optional[aiosqlite.Connection] = None
+_pool: Optional[asyncpg.Pool] = None
 
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS trainers (
-    user_id   INTEGER PRIMARY KEY,
+    user_id   BIGINT PRIMARY KEY,
     wins      INTEGER NOT NULL DEFAULT 0,
     losses    INTEGER NOT NULL DEFAULT 0,
     pokebucks INTEGER NOT NULL DEFAULT 500,
@@ -31,71 +28,67 @@ CREATE TABLE IF NOT EXISTS trainers (
 
 CREATE TABLE IF NOT EXISTS pokemon (
     instance_id TEXT PRIMARY KEY,
-    user_id     INTEGER NOT NULL,
+    user_id     BIGINT NOT NULL REFERENCES trainers(user_id) ON DELETE CASCADE,
     species_id  INTEGER NOT NULL,
     nickname    TEXT,
     level       INTEGER NOT NULL DEFAULT 5,
     gender      TEXT    NOT NULL DEFAULT 'genderless',
     moves       TEXT    NOT NULL DEFAULT '[]',
     in_party    INTEGER NOT NULL DEFAULT 0,
-    slot        INTEGER,
-    FOREIGN KEY (user_id) REFERENCES trainers(user_id) ON DELETE CASCADE
+    slot        INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_pokemon_user ON pokemon(user_id);
 CREATE INDEX IF NOT EXISTS idx_pokemon_party ON pokemon(user_id, in_party);
 
 CREATE TABLE IF NOT EXISTS inventory (
-    user_id  INTEGER NOT NULL,
+    user_id  BIGINT NOT NULL REFERENCES trainers(user_id) ON DELETE CASCADE,
     item_key TEXT    NOT NULL,
     qty      INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (user_id, item_key),
-    FOREIGN KEY (user_id) REFERENCES trainers(user_id) ON DELETE CASCADE
+    PRIMARY KEY (user_id, item_key)
 );
 
 CREATE TABLE IF NOT EXISTS pokedex (
-    user_id    INTEGER NOT NULL,
+    user_id    BIGINT NOT NULL REFERENCES trainers(user_id) ON DELETE CASCADE,
     species_id INTEGER NOT NULL,
-    PRIMARY KEY (user_id, species_id),
-    FOREIGN KEY (user_id) REFERENCES trainers(user_id) ON DELETE CASCADE
+    PRIMARY KEY (user_id, species_id)
 );
 """
 
 
-# --------------------------------------------------------------------------- #
-#                            ПОДКЛЮЧЕНИЕ / ОТКРЫТИЕ                          #
-# --------------------------------------------------------------------------- #
+async def connect(database_url: Optional[str] = None) -> None:
+    global _pool
+    url = database_url or os.getenv("DATABASE_URL")
+    if not url:
+        raise RuntimeError("DATABASE_URL не задан в переменных окружения")
 
-async def connect(db_path: Optional[str] = None) -> None:
-    global _db
-    path = db_path or os.getenv("SQLITE_DB", DEFAULT_DB_PATH)
-    _db = await aiosqlite.connect(path)
-    _db.row_factory = aiosqlite.Row
-    await _db.execute("PRAGMA foreign_keys = ON")
-    await _db.executescript(SCHEMA)
-    await _db.commit()
-    log.info("SQLite подключён: %s", path)
+    _pool = await asyncpg.create_pool(
+        url,
+        min_size=1,
+        max_size=5,
+        statement_cache_size=0,
+        command_timeout=30,
+    )
+    async with _pool.acquire() as conn:
+        await conn.execute(SCHEMA)
+    log.info("PostgreSQL подключён (Supabase)")
 
 
 async def close() -> None:
-    global _db
-    if _db is not None:
-        await _db.close()
-        _db = None
-        log.info("SQLite закрыт")
+    global _pool
+    if _pool is not None:
+        await _pool.close()
+        _pool = None
+        log.info("PostgreSQL закрыт")
 
 
-def _conn() -> aiosqlite.Connection:
-    if _db is None:
-        raise RuntimeError("SQLite не инициализирован. Вызовите database.connect().")
-    return _db
+def _pool_conn() -> asyncpg.Pool:
+    if _pool is None:
+        raise RuntimeError("PostgreSQL не инициализирован. Вызовите database.connect().")
+    return _pool
 
 
-# --------------------------------------------------------------------------- #
-#                              ХЕЛПЕРЫ                                        #
-# --------------------------------------------------------------------------- #
-
-def _trainer_dict(row: aiosqlite.Row) -> dict[str, Any]:
+def _trainer_dict(row: asyncpg.Record) -> dict[str, Any]:
     return {
         "user_id": row["user_id"],
         "wins": row["wins"],
@@ -105,7 +98,7 @@ def _trainer_dict(row: aiosqlite.Row) -> dict[str, Any]:
     }
 
 
-def _pokemon_dict(row: aiosqlite.Row) -> dict[str, Any]:
+def _pokemon_dict(row: asyncpg.Record) -> dict[str, Any]:
     try:
         moves = json.loads(row["moves"]) if row["moves"] else []
     except json.JSONDecodeError:
@@ -120,225 +113,184 @@ def _pokemon_dict(row: aiosqlite.Row) -> dict[str, Any]:
     }
 
 
-async def _ensure_trainer(user_id: int) -> None:
-    db = _conn()
-    await db.execute(
-        "INSERT OR IGNORE INTO trainers (user_id, wins, losses, pokebucks, location) "
-        "VALUES (?, 0, 0, ?, ?)",
-        (user_id, START_POKEBUCKS, START_LOCATION),
+async def _ensure_trainer(conn: asyncpg.Connection, user_id: int) -> None:
+    await conn.execute(
+        "INSERT INTO trainers (user_id, wins, losses, pokebucks, location) "
+        "VALUES ($1, 0, 0, $2, $3) ON CONFLICT (user_id) DO NOTHING",
+        user_id, START_POKEBUCKS, START_LOCATION,
     )
-    await db.commit()
 
-
-# --------------------------------------------------------------------------- #
-#                                ТРЕНЕРЫ                                      #
-# --------------------------------------------------------------------------- #
 
 async def get_trainer(user_id: int) -> dict[str, Any]:
-    await _ensure_trainer(user_id)
-    db = _conn()
+    pool = _pool_conn()
+    async with pool.acquire() as conn:
+        await _ensure_trainer(conn, user_id)
 
-    async with db.execute(
-        "SELECT * FROM trainers WHERE user_id = ?", (user_id,)
-    ) as cur:
-        trow = await cur.fetchone()
-    trainer = _trainer_dict(trow)
+        trow = await conn.fetchrow("SELECT * FROM trainers WHERE user_id = $1", user_id)
+        trainer = _trainer_dict(trow)
 
-    async with db.execute(
-        "SELECT * FROM pokemon WHERE user_id = ? AND in_party = 1 "
-        "ORDER BY slot ASC, instance_id ASC",
-        (user_id,),
-    ) as cur:
-        party_rows = await cur.fetchall()
+        party_rows = await conn.fetch(
+            "SELECT * FROM pokemon WHERE user_id = $1 AND in_party = 1 "
+            "ORDER BY slot ASC, instance_id ASC", user_id,
+        )
+        pc_rows = await conn.fetch(
+            "SELECT * FROM pokemon WHERE user_id = $1 AND in_party = 0 "
+            "ORDER BY instance_id ASC", user_id,
+        )
+        trainer["party"] = [_pokemon_dict(r) for r in party_rows]
+        trainer["pc"] = [_pokemon_dict(r) for r in pc_rows]
 
-    async with db.execute(
-        "SELECT * FROM pokemon WHERE user_id = ? AND in_party = 0 "
-        "ORDER BY rowid ASC",
-        (user_id,),
-    ) as cur:
-        pc_rows = await cur.fetchall()
+        inv_rows = await conn.fetch(
+            "SELECT item_key, qty FROM inventory WHERE user_id = $1", user_id,
+        )
+        trainer["inventory"] = {r["item_key"]: r["qty"] for r in inv_rows}
 
-    trainer["party"] = [_pokemon_dict(r) for r in party_rows]
-    trainer["pc"] = [_pokemon_dict(r) for r in pc_rows]
-
-    async with db.execute(
-        "SELECT item_key, qty FROM inventory WHERE user_id = ?", (user_id,)
-    ) as cur:
-        inv_rows = await cur.fetchall()
-    trainer["inventory"] = {r["item_key"]: r["qty"] for r in inv_rows}
-
-    async with db.execute(
-        "SELECT species_id FROM pokedex WHERE user_id = ?", (user_id,)
-    ) as cur:
-        dex_rows = await cur.fetchall()
-    trainer["pokedex_known"] = [r["species_id"] for r in dex_rows]
+        dex_rows = await conn.fetch(
+            "SELECT species_id FROM pokedex WHERE user_id = $1", user_id,
+        )
+        trainer["pokedex_known"] = [r["species_id"] for r in dex_rows]
 
     return trainer
 
 
 async def set_location(user_id: int, location: str) -> None:
-    await _ensure_trainer(user_id)
-    db = _conn()
-    await db.execute(
-        "UPDATE trainers SET location = ? WHERE user_id = ?", (location, user_id)
-    )
-    await db.commit()
+    pool = _pool_conn()
+    async with pool.acquire() as conn:
+        await _ensure_trainer(conn, user_id)
+        await conn.execute(
+            "UPDATE trainers SET location = $1 WHERE user_id = $2", location, user_id,
+        )
 
 
 async def add_pokebucks(user_id: int, amount: int) -> int:
-    await _ensure_trainer(user_id)
-    db = _conn()
-    async with db.execute(
-        "SELECT pokebucks FROM trainers WHERE user_id = ?", (user_id,)
-    ) as cur:
-        row = await cur.fetchone()
-    current = row["pokebucks"] if row else 0
-    new_value = max(0, current + int(amount))
-    await db.execute(
-        "UPDATE trainers SET pokebucks = ? WHERE user_id = ?", (new_value, user_id)
-    )
-    await db.commit()
+    pool = _pool_conn()
+    async with pool.acquire() as conn:
+        await _ensure_trainer(conn, user_id)
+        row = await conn.fetchrow(
+            "SELECT pokebucks FROM trainers WHERE user_id = $1", user_id,
+        )
+        current = row["pokebucks"] if row else 0
+        new_value = max(0, current + int(amount))
+        await conn.execute(
+            "UPDATE trainers SET pokebucks = $1 WHERE user_id = $2", new_value, user_id,
+        )
     return new_value
 
 
 async def spend_pokebucks(user_id: int, cost: int) -> bool:
-    await _ensure_trainer(user_id)
-    db = _conn()
-    cursor = await db.execute(
-        "UPDATE trainers SET pokebucks = pokebucks - ? "
-        "WHERE user_id = ? AND pokebucks >= ?",
-        (cost, user_id, cost),
-    )
-    await db.commit()
-    return cursor.rowcount > 0
+    pool = _pool_conn()
+    async with pool.acquire() as conn:
+        await _ensure_trainer(conn, user_id)
+        result = await conn.execute(
+            "UPDATE trainers SET pokebucks = pokebucks - $1 "
+            "WHERE user_id = $2 AND pokebucks >= $1",
+            cost, user_id,
+        )
+    return result.endswith("1")
 
 
 async def inc_wins(user_id: int, amount: int = 1) -> None:
-    await _ensure_trainer(user_id)
-    db = _conn()
-    await db.execute(
-        "UPDATE trainers SET wins = wins + ? WHERE user_id = ?", (amount, user_id)
-    )
-    await db.commit()
+    pool = _pool_conn()
+    async with pool.acquire() as conn:
+        await _ensure_trainer(conn, user_id)
+        await conn.execute(
+            "UPDATE trainers SET wins = wins + $1 WHERE user_id = $2", amount, user_id,
+        )
 
 
 async def inc_losses(user_id: int, amount: int = 1) -> None:
-    await _ensure_trainer(user_id)
-    db = _conn()
-    await db.execute(
-        "UPDATE trainers SET losses = losses + ? WHERE user_id = ?", (amount, user_id)
-    )
-    await db.commit()
+    pool = _pool_conn()
+    async with pool.acquire() as conn:
+        await _ensure_trainer(conn, user_id)
+        await conn.execute(
+            "UPDATE trainers SET losses = losses + $1 WHERE user_id = $2", amount, user_id,
+        )
 
 
-# --------------------------------------------------------------------------- #
-#                                ПОКЕМОНЫ                                     #
-# --------------------------------------------------------------------------- #
+async def add_pokemon(user_id: int, mon: dict[str, Any], to_party: bool = False) -> bool:
+    pool = _pool_conn()
+    async with pool.acquire() as conn:
+        await _ensure_trainer(conn, user_id)
 
-async def add_pokemon(
-    user_id: int, mon: dict[str, Any], to_party: bool = False
-) -> bool:
-    await _ensure_trainer(user_id)
-    db = _conn()
+        in_party = 0
+        slot: Optional[int] = None
+        if to_party:
+            cnt = await conn.fetchval(
+                "SELECT COUNT(*) FROM pokemon WHERE user_id = $1 AND in_party = 1",
+                user_id,
+            )
+            if cnt < MAX_PARTY_SIZE:
+                in_party = 1
+                slot = int(cnt)
 
-    in_party = 0
-    slot: Optional[int] = None
-    if to_party:
-        async with db.execute(
-            "SELECT COUNT(*) AS c FROM pokemon WHERE user_id = ? AND in_party = 1",
-            (user_id,),
-        ) as cur:
-            row = await cur.fetchone()
-        if row["c"] < MAX_PARTY_SIZE:
-            in_party = 1
-            slot = int(row["c"])
-
-    moves_json = json.dumps(mon.get("moves", []), ensure_ascii=False)
-    await db.execute(
-        "INSERT INTO pokemon "
-        "(instance_id, user_id, species_id, nickname, level, gender, moves, in_party, slot) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (
-            mon["instance_id"],
-            user_id,
-            int(mon["species_id"]),
-            mon.get("nickname"),
-            int(mon.get("level", 5)),
-            mon.get("gender", "genderless"),
-            moves_json,
-            in_party,
-            slot,
-        ),
-    )
-    await db.commit()
+        moves_json = json.dumps(mon.get("moves", []), ensure_ascii=False)
+        await conn.execute(
+            "INSERT INTO pokemon "
+            "(instance_id, user_id, species_id, nickname, level, gender, moves, in_party, slot) "
+            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+            mon["instance_id"], user_id, int(mon["species_id"]),
+            mon.get("nickname"), int(mon.get("level", 5)),
+            mon.get("gender", "genderless"), moves_json, in_party, slot,
+        )
     return bool(in_party)
 
 
 async def remove_pokemon(user_id: int, instance_id: str) -> bool:
-    db = _conn()
-    cursor = await db.execute(
-        "DELETE FROM pokemon WHERE user_id = ? AND instance_id = ?",
-        (user_id, instance_id),
+    pool = _pool_conn()
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            "DELETE FROM pokemon WHERE user_id = $1 AND instance_id = $2",
+            user_id, instance_id,
+        )
+    return result.endswith("1")
+
+
+async def _reslot_party(conn: asyncpg.Connection, user_id: int) -> None:
+    rows = await conn.fetch(
+        "SELECT instance_id FROM pokemon WHERE user_id = $1 AND in_party = 1 "
+        "ORDER BY slot ASC, instance_id ASC", user_id,
     )
-    await db.commit()
-    return cursor.rowcount > 0
-
-
-async def _reslot_party(user_id: int) -> None:
-    db = _conn()
-    async with db.execute(
-        "SELECT instance_id FROM pokemon WHERE user_id = ? AND in_party = 1 "
-        "ORDER BY slot ASC, instance_id ASC",
-        (user_id,),
-    ) as cur:
-        rows = await cur.fetchall()
     for i, r in enumerate(rows):
-        await db.execute(
-            "UPDATE pokemon SET slot = ? WHERE instance_id = ?",
-            (i, r["instance_id"]),
+        await conn.execute(
+            "UPDATE pokemon SET slot = $1 WHERE instance_id = $2",
+            i, r["instance_id"],
         )
 
 
-async def move_pokemon(
-    user_id: int, instance_id: str, to_party: bool
-) -> tuple[bool, str]:
-    db = _conn()
-
-    async with db.execute(
-        "SELECT * FROM pokemon WHERE user_id = ? AND instance_id = ?",
-        (user_id, instance_id),
-    ) as cur:
-        row = await cur.fetchone()
-    if row is None:
-        return False, "Покемон не найден."
-
-    already_party = bool(row["in_party"])
-    if already_party == to_party:
-        return False, "Покемон уже там." if to_party else "Покемон уже в ПК."
-
-    if to_party:
-        async with db.execute(
-            "SELECT COUNT(*) AS c FROM pokemon WHERE user_id = ? AND in_party = 1",
-            (user_id,),
-        ) as cur:
-            cnt_row = await cur.fetchone()
-        if cnt_row["c"] >= MAX_PARTY_SIZE:
-            return False, f"Команда заполнена ({MAX_PARTY_SIZE}/{MAX_PARTY_SIZE})."
-        new_slot = int(cnt_row["c"])
-        await db.execute(
-            "UPDATE pokemon SET in_party = 1, slot = ? "
-            "WHERE user_id = ? AND instance_id = ?",
-            (new_slot, user_id, instance_id),
+async def move_pokemon(user_id: int, instance_id: str, to_party: bool) -> tuple[bool, str]:
+    pool = _pool_conn()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM pokemon WHERE user_id = $1 AND instance_id = $2",
+            user_id, instance_id,
         )
-    else:
-        await db.execute(
-            "UPDATE pokemon SET in_party = 0, slot = NULL "
-            "WHERE user_id = ? AND instance_id = ?",
-            (user_id, instance_id),
-        )
-        await _reslot_party(user_id)
+        if row is None:
+            return False, "Покемон не найден."
 
-    await db.commit()
+        already_party = bool(row["in_party"])
+        if already_party == to_party:
+            return False, "Покемон уже там." if to_party else "Покемон уже в ПК."
+
+        if to_party:
+            cnt = await conn.fetchval(
+                "SELECT COUNT(*) FROM pokemon WHERE user_id = $1 AND in_party = 1",
+                user_id,
+            )
+            if cnt >= MAX_PARTY_SIZE:
+                return False, f"Команда заполнена ({MAX_PARTY_SIZE}/{MAX_PARTY_SIZE})."
+            await conn.execute(
+                "UPDATE pokemon SET in_party = 1, slot = $1 "
+                "WHERE user_id = $2 AND instance_id = $3",
+                int(cnt), user_id, instance_id,
+            )
+        else:
+            await conn.execute(
+                "UPDATE pokemon SET in_party = 0, slot = NULL "
+                "WHERE user_id = $1 AND instance_id = $2",
+                user_id, instance_id,
+            )
+            await _reslot_party(conn, user_id)
+
     return True, "OK"
 
 
@@ -351,90 +303,88 @@ async def update_pokemon(user_id: int, instance_id: str, **fields: Any) -> bool:
     update_fields = {k: v for k, v in fields.items() if k in allowed}
     if not update_fields:
         return False
-    set_clause = ", ".join(f"{k} = ?" for k in update_fields)
+
+    set_clause = ", ".join(f"{k} = ${i+1}" for i, k in enumerate(update_fields))
     values = list(update_fields.values()) + [user_id, instance_id]
-    db = _conn()
-    cursor = await db.execute(
-        f"UPDATE pokemon SET {set_clause} WHERE user_id = ? AND instance_id = ?",
-        values,
-    )
-    await db.commit()
-    return cursor.rowcount > 0
+    pool = _pool_conn()
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            f"UPDATE pokemon SET {set_clause} "
+            f"WHERE user_id = ${len(values)-1} AND instance_id = ${len(values)}",
+            *values,
+        )
+    return result.endswith("1")
 
 
-async def get_pokemon(user_id: int, instance_id: str) -> dict[str, Any] | None:
-    db = _conn()
-    async with db.execute(
-        "SELECT * FROM pokemon WHERE user_id = ? AND instance_id = ?",
-        (user_id, instance_id),
-    ) as cur:
-        row = await cur.fetchone()
+async def get_pokemon(user_id: int, instance_id: str) -> Optional[dict[str, Any]]:
+    pool = _pool_conn()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM pokemon WHERE user_id = $1 AND instance_id = $2",
+            user_id, instance_id,
+        )
     return _pokemon_dict(row) if row else None
 
 
-# --------------------------------------------------------------------------- #
-#                                ИНВЕНТАРЬ                                    #
-# --------------------------------------------------------------------------- #
-
 async def add_item(user_id: int, item_key: str, qty: int) -> None:
-    await _ensure_trainer(user_id)
-    db = _conn()
-    await db.execute(
-        "INSERT INTO inventory (user_id, item_key, qty) VALUES (?, ?, ?) "
-        "ON CONFLICT(user_id, item_key) DO UPDATE SET qty = qty + excluded.qty",
-        (user_id, item_key, qty),
-    )
-    await db.commit()
+    pool = _pool_conn()
+    async with pool.acquire() as conn:
+        await _ensure_trainer(conn, user_id)
+        await conn.execute(
+            "INSERT INTO inventory (user_id, item_key, qty) VALUES ($1, $2, $3) "
+            "ON CONFLICT (user_id, item_key) DO UPDATE SET qty = inventory.qty + EXCLUDED.qty",
+            user_id, item_key, qty,
+        )
 
 
 async def get_item_qty(user_id: int, item_key: str) -> int:
-    db = _conn()
-    async with db.execute(
-        "SELECT qty FROM inventory WHERE user_id = ? AND item_key = ?",
-        (user_id, item_key),
-    ) as cur:
-        row = await cur.fetchone()
+    pool = _pool_conn()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT qty FROM inventory WHERE user_id = $1 AND item_key = $2",
+            user_id, item_key,
+        )
     return row["qty"] if row else 0
 
 
 async def take_item(user_id: int, item_key: str, qty: int = 1) -> bool:
-    db = _conn()
-    cursor = await db.execute(
-        "UPDATE inventory SET qty = qty - ? "
-        "WHERE user_id = ? AND item_key = ? AND qty >= ?",
-        (qty, user_id, item_key, qty),
-    )
-    await db.commit()
-    return cursor.rowcount > 0
+    pool = _pool_conn()
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            "UPDATE inventory SET qty = qty - $1 "
+            "WHERE user_id = $2 AND item_key = $3 AND qty >= $1",
+            qty, user_id, item_key,
+        )
+    return result.endswith("1")
 
-
-# --------------------------------------------------------------------------- #
-#                                ПОКЕДЕКС                                     #
-# --------------------------------------------------------------------------- #
 
 async def add_to_pokedex(user_id: int, species_id: int) -> bool:
-    await _ensure_trainer(user_id)
-    db = _conn()
-    cursor = await db.execute(
-        "INSERT OR IGNORE INTO pokedex (user_id, species_id) VALUES (?, ?)",
-        (user_id, int(species_id)),
-    )
-    await db.commit()
-    return cursor.rowcount > 0
+    pool = _pool_conn()
+    async with pool.acquire() as conn:
+        await _ensure_trainer(conn, user_id)
+        result = await conn.execute(
+            "INSERT INTO pokedex (user_id, species_id) VALUES ($1, $2) "
+            "ON CONFLICT (user_id, species_id) DO NOTHING",
+            user_id, int(species_id),
+        )
+    return result.endswith("1")
 
-
-# --------------------------------------------------------------------------- #
-#                                  СБРОС                                      #
-# --------------------------------------------------------------------------- #
 
 async def reset_trainer(user_id: int) -> None:
-    db = _conn()
-    await db.execute("DELETE FROM pokemon   WHERE user_id = ?", (user_id,))
-    await db.execute("DELETE FROM inventory WHERE user_id = ?", (user_id,))
-    await db.execute("DELETE FROM pokedex   WHERE user_id = ?", (user_id,))
-    await db.execute("DELETE FROM trainers  WHERE user_id = ?", (user_id,))
-    await db.commit()
-
-    await _ensure_trainer(user_id)
-    await add_item(user_id, POKEBALL_KEY, 5)
-    await add_item(user_id, POTION_KEY, 3)
+    pool = _pool_conn()
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM pokemon   WHERE user_id = $1", user_id)
+        await conn.execute("DELETE FROM inventory WHERE user_id = $1", user_id)
+        await conn.execute("DELETE FROM pokedex   WHERE user_id = $1", user_id)
+        await conn.execute("DELETE FROM trainers  WHERE user_id = $1", user_id)
+        await _ensure_trainer(conn, user_id)
+        await conn.execute(
+            "INSERT INTO inventory (user_id, item_key, qty) VALUES ($1, $2, 5) "
+            "ON CONFLICT (user_id, item_key) DO UPDATE SET qty = 5",
+            user_id, POKEBALL_KEY,
+        )
+        await conn.execute(
+            "INSERT INTO inventory (user_id, item_key, qty) VALUES ($1, $2, 3) "
+            "ON CONFLICT (user_id, item_key) DO UPDATE SET qty = 3",
+            user_id, POTION_KEY,
+        )
