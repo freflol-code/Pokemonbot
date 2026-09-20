@@ -1,9 +1,12 @@
-"""Асинхронный клиент PokéAPI с кэшированием и защитой от гонок."""
+"""Асинхронный клиент PokéAPI с кэшированием, русскими именами и защитой от гонок."""
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
 import random
+import unicodedata
 from typing import Any, Optional
 
 import aiohttp
@@ -12,6 +15,7 @@ log = logging.getLogger(__name__)
 
 BASE_URL = "https://pokeapi.co/api/v2"
 MAX_POKEMON_ID = 1025
+NAME_INDEX_FILE = "name_index.json"
 
 _session: Optional[aiohttp.ClientSession] = None
 _session_lock = asyncio.Lock()
@@ -20,10 +24,18 @@ _gender_cache: dict[int, int] = {}
 _species_index: Optional[list[tuple[int, str]]] = None
 _species_index_lock = asyncio.Lock()
 
+_name_index: dict[str, int] = {}
+_name_index_lock = asyncio.Lock()
+_name_index_ready = False
+
 
 class PokeAPIError(Exception):
     """Ошибка при обращении к PokéAPI."""
 
+
+# --------------------------------------------------------------------------- #
+#                          СЕССИЯ И HTTP-ЗАПРОСЫ                              #
+# --------------------------------------------------------------------------- #
 
 async def _get_session() -> aiohttp.ClientSession:
     global _session
@@ -44,11 +56,11 @@ async def close() -> None:
         _session = None
 
 
-async def _fetch_json(url: str, retries: int = 3) -> dict[str, Any]:
+async def _fetch_json(url: str, retries: int = 3, timeout: int = 15) -> dict[str, Any]:
     session = await _get_session()
     for attempt in range(retries):
         try:
-            async with session.get(url) as resp:
+            async with session.get(url, timeout=timeout) as resp:
                 if resp.status == 200:
                     return await resp.json()
                 if resp.status == 404:
@@ -62,6 +74,20 @@ async def _fetch_json(url: str, retries: int = 3) -> dict[str, Any]:
     raise PokeAPIError("PokéAPI недоступен, попробуйте позже")
 
 
+# --------------------------------------------------------------------------- #
+#                    НОРМАЛИЗАЦИЯ И ОБРАБОТКА                                 #
+# --------------------------------------------------------------------------- #
+
+def _normalize(text: str) -> str:
+    if not text:
+        return ""
+    s = text.strip().lower()
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    s = " ".join(s.split())
+    return s
+
+
 def _extract_species_id(raw: dict[str, Any], fallback: int) -> int:
     species_url = (raw.get("species") or {}).get("url")
     if not species_url:
@@ -73,7 +99,6 @@ def _extract_species_id(raw: dict[str, Any], fallback: int) -> int:
 
 
 def _process_pokemon_raw(raw: dict[str, Any]) -> dict[str, Any]:
-    """Преобразует сырой ответ PokéAPI в наш формат."""
     sprites = raw.get("sprites") or {}
     artwork = ((sprites.get("other") or {}).get("official-artwork") or {}).get(
         "front_default"
@@ -91,6 +116,84 @@ def _process_pokemon_raw(raw: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# --------------------------------------------------------------------------- #
+#                             ИНДЕКС ИМЁН                                     #
+# --------------------------------------------------------------------------- #
+
+async def _build_name_index() -> dict[str, int]:
+    """Скачивает все виды и собирает {имя: id} (русские + английские + номера)."""
+    log.info("Генерация индекса имён покемонов (1–2 минуты)…")
+    index: dict[str, int] = {}
+    session = await _get_session()
+    sem = asyncio.Semaphore(20)
+
+    async def fetch_one(sid: int) -> Optional[dict[str, Any]]:
+        async with sem:
+            try:
+                async with session.get(
+                    f"{BASE_URL}/pokemon-species/{sid}",
+                    timeout=aiohttp.ClientTimeout(total=20),
+                ) as resp:
+                    if resp.status == 200:
+                        return await resp.json()
+            except Exception:
+                pass
+        return None
+
+    tasks = [fetch_one(i) for i in range(1, MAX_POKEMON_ID + 1)]
+    done = 0
+    for coro in asyncio.as_completed(tasks):
+        data = await coro
+        done += 1
+        if done % 200 == 0:
+            log.info("Индекс: %d/%d", done, MAX_POKEMON_ID)
+        if not data:
+            continue
+        sid = data.get("id")
+        if not isinstance(sid, int):
+            continue
+        eng = data.get("name")
+        if eng:
+            index[_normalize(eng)] = sid
+            index[str(sid)] = sid
+        for n in data.get("names", []) or []:
+            name = (n.get("name") or "").strip()
+            if name:
+                index[_normalize(name)] = sid
+
+    try:
+        with open(NAME_INDEX_FILE, "w", encoding="utf-8") as f:
+            json.dump(index, f, ensure_ascii=False)
+        log.info("Индекс сохранён (%d записей)", len(index))
+    except OSError as e:
+        log.warning("Не удалось сохранить индекс: %s", e)
+    return index
+
+
+async def ensure_name_index() -> dict[str, int]:
+    """Ленивая загрузка. Кэшируется в файл NAME_INDEX_FILE."""
+    global _name_index, _name_index_ready
+    async with _name_index_lock:
+        if _name_index_ready:
+            return _name_index
+        if os.path.exists(NAME_INDEX_FILE):
+            try:
+                with open(NAME_INDEX_FILE, "r", encoding="utf-8") as f:
+                    _name_index = json.load(f)
+                _name_index_ready = True
+                log.info("Индекс загружен из файла: %d записей", len(_name_index))
+                return _name_index
+            except (OSError, json.JSONDecodeError) as e:
+                log.warning("Не удалось прочитать индекс: %s. Строю заново", e)
+        _name_index = await _build_name_index()
+        _name_index_ready = True
+        return _name_index
+
+
+# --------------------------------------------------------------------------- #
+#                              ОСНОВНОЙ API                                   #
+# --------------------------------------------------------------------------- #
+
 async def get_pokemon(pokemon_id: int) -> dict[str, Any]:
     if pokemon_id in _pokemon_cache:
         return _pokemon_cache[pokemon_id]
@@ -101,22 +204,30 @@ async def get_pokemon(pokemon_id: int) -> dict[str, Any]:
 
 
 async def get_pokemon_by_name(name_or_id: str) -> dict[str, Any]:
-    """Ищет покемона по имени ('pikachu', 'mr-mime', '#25') или по номеру."""
-    query = str(name_or_id).strip().lower().lstrip("#").replace(" ", "-")
-    if not query:
+    """Поиск по русскому/английскому имени или номеру."""
+    query_raw = str(name_or_id).strip().lstrip("#").strip()
+    if not query_raw:
         raise PokeAPIError("Пустой запрос")
 
-    if query.isdigit():
-        return await get_pokemon(int(query))
+    if query_raw.isdigit():
+        return await get_pokemon(int(query_raw))
 
-    for data in _pokemon_cache.values():
-        if data.get("raw_name") == query:
-            return data
+    index = await ensure_name_index()
+    sid = index.get(_normalize(query_raw))
+    if sid:
+        return await get_pokemon(sid)
 
-    raw = await _fetch_json(f"{BASE_URL}/pokemon/{query}")
-    data = _process_pokemon_raw(raw)
-    _pokemon_cache[data["id"]] = data
-    return data
+    raw_name = query_raw.lower().replace(" ", "-")
+    try:
+        raw = await _fetch_json(f"{BASE_URL}/pokemon/{raw_name}")
+        data = _process_pokemon_raw(raw)
+        _pokemon_cache[data["id"]] = data
+        return data
+    except PokeAPIError:
+        raise PokeAPIError(
+            f"Покемон «{query_raw}» не найден. "
+            f"Введите русское/английское имя или номер (#25)."
+        )
 
 
 async def get_random_pokemon() -> dict[str, Any]:
@@ -124,7 +235,6 @@ async def get_random_pokemon() -> dict[str, Any]:
 
 
 async def get_species_index() -> list[tuple[int, str]]:
-    """Ленивый кэш всех видов: [(id, 'pikachu'), ...] — для автодополнения."""
     global _species_index
     async with _species_index_lock:
         if _species_index is None:
@@ -160,3 +270,11 @@ async def roll_gender(pokemon_id: int) -> str:
 def pick_random_moves(data: dict[str, Any], count: int = 4) -> list[str]:
     moves = data.get("moves") or []
     return random.sample(moves, min(count, len(moves)))
+
+
+async def get_wild_pokemon_for_location(encounters: list[int] | None) -> dict[str, Any]:
+    if encounters:
+        species_id = random.choice(encounters)
+    else:
+        species_id = random.randint(1, MAX_POKEMON_ID)
+    return await get_pokemon(species_id)
