@@ -1,4 +1,4 @@
-"""Профили игроков: создание, переключение, просмотр."""
+"""Профили игроков: создание, переключение, просмотр, удаление."""
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -23,11 +23,6 @@ PROFILE_TYPE_CHOICES = [
 PROFILE_TYPE_LABEL = {
     "trainer": "🎓 Тренер",
     "pokemon": "🐾 Покемон",
-}
-
-STATUS_LABEL = {
-    "wild": "🌿 Дикий",
-    "caught": "🔴 Пойман",
 }
 
 GENDER_LABEL = {
@@ -58,17 +53,39 @@ def _ptype_label(ptype: str) -> str:
 
 
 def _status_label(status: str | None, pokeball: str | None) -> str:
+    """Дикий — без покебола. Пойман — с покеболом."""
     status = status or "wild"
     if status == "caught":
         ball_name = POKEBALL_LABEL.get(pokeball, pokeball) if pokeball else "не указан"
         return f"🔴 Пойман • Покебол: {ball_name}"
-    return "🌿 Дикий • Покебол: Нет"
+    return "🌿 Дикий"
 
 
 def _gender_label(gender: str | None) -> str:
     if not gender:
         return "—"
     return GENDER_LABEL.get(gender, gender)
+
+
+async def _profile_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[str]]:
+    """Автодополнение: показывает профили текущего игрока."""
+    profiles = await list_profiles(interaction.user.id)
+    cur = current.strip().lower()
+    out: list[app_commands.Choice[str]] = []
+    for p in profiles:
+        if p["profile_type"] == "pokemon":
+            extra = f"🐾 Ур.{p.get('level') or '?'}"
+        else:
+            extra = f"🎓 {p['pokebucks']:,} PB"
+        marker = "🟢 " if p["is_active"] else ""
+        label = f"{marker}{p['name']} • {extra}"
+        if not cur or cur in label.lower() or cur in p["profile_id"]:
+            out.append(app_commands.Choice(name=label[:100], value=p["profile_id"]))
+        if len(out) >= 25:
+            break
+    return out
 
 
 class Profile(commands.Cog):
@@ -166,7 +183,6 @@ class Profile(commands.Cog):
             mon_status = status.value if status else "wild"
             if mon_status == "caught":
                 mon_ball = (pokeball or "pokeball").strip().lower().replace(" ", "_")
-            # Если дикий — покебол остаётся None
 
         profile = await create_profile(
             user_id=interaction.user.id,
@@ -194,9 +210,7 @@ class Profile(commands.Cog):
         if profile_type.value == "pokemon":
             embed.add_field(name="🎚️ Уровень", value=str(profile.get("level") or "—"))
             embed.add_field(name="🎭 Пол", value=_gender_label(profile.get("gender")))
-            embed.add_field(
-                name="✨ Способность", value=profile.get("ability") or "—"
-            )
+            embed.add_field(name="✨ Способность", value=profile.get("ability") or "—")
             embed.add_field(
                 name="⚔️ Атаки",
                 value=format_moves(profile.get("moves") or []),
@@ -258,7 +272,8 @@ class Profile(commands.Cog):
         name="switch",
         description="Переключиться на другого персонажа",
     )
-    @app_commands.describe(profile_id="ID профиля (см. /my_profiles)")
+    @app_commands.describe(profile_id="Выберите персонажа из списка")
+    @app_commands.autocomplete(profile_id=_profile_autocomplete)
     async def switch(
         self,
         interaction: discord.Interaction,
@@ -289,24 +304,15 @@ class Profile(commands.Cog):
 
     @app_commands.command(
         name="delete_profile",
-        description="Удалить персонажа (НЕОБРАТИМО)",
+        description="Удалить своего персонажа (НЕОБРАТИМО)",
     )
-    @app_commands.describe(
-        profile_id="ID профиля",
-        confirm="Введите 'ДА' для подтверждения",
-    )
+    @app_commands.describe(profile_id="Выберите персонажа для удаления")
+    @app_commands.autocomplete(profile_id=_profile_autocomplete)
     async def delete_profile_cmd(
         self,
         interaction: discord.Interaction,
         profile_id: str,
-        confirm: str,
     ) -> None:
-        if confirm != "ДА":
-            await interaction.response.send_message(
-                "❌ Отменено. Для подтверждения введите `confirm:ДА`", ephemeral=True
-            )
-            return
-
         pid = profile_id.strip()
         profile = await get_profile(pid)
         if not profile or profile["user_id"] != interaction.user.id:
@@ -315,10 +321,25 @@ class Profile(commands.Cog):
             )
             return
 
-        await delete_profile(interaction.user.id, pid)
-        await interaction.response.send_message(
-            f"🗑️ Профиль **{profile['name']}** удалён.", ephemeral=True
+        # Кнопка подтверждения
+        view = ConfirmDeleteView(
+            owner_id=interaction.user.id,
+            profile_id=pid,
+            profile_name=profile["name"],
+            profile_type=profile["profile_type"],
         )
+        embed = discord.Embed(
+            title="⚠️ Удаление персонажа",
+            description=(
+                f"Вы действительно хотите удалить **{profile['name']}** "
+                f"({_ptype_label(profile['profile_type'])})?\n\n"
+                f"Это **необратимо**: покемоны, деньги, инвентарь и статистика будут потеряны."
+            ),
+            color=discord.Color.orange(),
+        )
+        if profile.get("avatar_url"):
+            embed.set_thumbnail(url=profile["avatar_url"])
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
     # ------------------------------------------------------------------ /profile
 
@@ -425,6 +446,67 @@ class Profile(commands.Cog):
 
         embed = discord.Embed(title="💰 Баланс", description=desc, color=EMBED_COLOR)
         await interaction.response.send_message(embed=embed)
+
+
+# --------------------------------------------------------------------------- #
+#                          КНОПКА ПОДТВЕРЖДЕНИЯ                                #
+# --------------------------------------------------------------------------- #
+
+class ConfirmDeleteView(discord.ui.View):
+    """Подтверждение удаления профиля — кнопками."""
+
+    def __init__(
+        self,
+        owner_id: int,
+        profile_id: str,
+        profile_name: str,
+        profile_type: str,
+    ) -> None:
+        super().__init__(timeout=60)
+        self.owner_id = owner_id
+        self.profile_id = profile_id
+        self.profile_name = profile_name
+        self.profile_type = profile_type
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message(
+                "Это не ваше подтверждение.", ephemeral=True
+            )
+            return False
+        return True
+
+    @discord.ui.button(label="Да, удалить", style=discord.ButtonStyle.danger)
+    async def confirm(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        await delete_profile(self.owner_id, self.profile_id)
+
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(
+            embed=discord.Embed(
+                title="🗑️ Персонаж удалён",
+                description=f"**{self.profile_name}** удалён.",
+                color=discord.Color.dark_red(),
+            ),
+            view=self,
+        )
+
+    @discord.ui.button(label="Отмена", style=discord.ButtonStyle.secondary)
+    async def cancel(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(
+            embed=discord.Embed(
+                title="❌ Отменено",
+                description="Удаление профиля отменено.",
+                color=discord.Color.greyple(),
+            ),
+            view=self,
+        )
 
 
 async def setup(bot: commands.Bot) -> None:
