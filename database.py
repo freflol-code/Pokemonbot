@@ -149,6 +149,26 @@ def _profile_dict(row: asyncpg.Record) -> dict[str, Any]:
     }
 
 
+def _pokemon_dict(row: asyncpg.Record) -> dict[str, Any]:
+    try:
+        moves = json.loads(row["moves"]) if row["moves"] else []
+    except json.JSONDecodeError:
+        moves = []
+    return {
+        "instance_id": row["instance_id"],
+        "species_id": row["species_id"],
+        "nickname": row["nickname"],
+        "level": row["level"],
+        "gender": row["gender"],
+        "moves": moves,
+        "ability": row["ability"],
+    }
+
+
+# --------------------------------------------------------------------------- #
+#                                 ПРОФИЛИ                                      #
+# --------------------------------------------------------------------------- #
+
 async def create_profile(
     user_id: int,
     name: str,
@@ -266,23 +286,17 @@ async def _ensure_profile(user_id: int) -> dict[str, Any]:
     return await create_profile(user_id, name="Тренер", profile_type="trainer")
 
 
-def _pokemon_dict(row: asyncpg.Record) -> dict[str, Any]:
-    try:
-        moves = json.loads(row["moves"]) if row["moves"] else []
-    except json.JSONDecodeError:
-        moves = []
-    return {
-        "instance_id": row["instance_id"],
-        "species_id": row["species_id"],
-        "nickname": row["nickname"],
-        "level": row["level"],
-        "gender": row["gender"],
-        "moves": moves,
-        "ability": row["ability"],
-    }
+async def _pid_of(user_id: int) -> str:
+    profile = await _ensure_profile(user_id)
+    return profile["profile_id"]
 
+
+# --------------------------------------------------------------------------- #
+#                          ОБЁРТКА ДЛЯ СТАРЫХ КОГОВ                            #
+# --------------------------------------------------------------------------- #
 
 async def get_trainer(user_id: int) -> dict[str, Any]:
+    """Возвращает активный профиль + партию + ПК + инвентарь + покедекс."""
     profile = await _ensure_profile(user_id)
     pid = profile["profile_id"]
 
@@ -311,10 +325,9 @@ async def get_trainer(user_id: int) -> dict[str, Any]:
     return trainer
 
 
-async def _pid_of(user_id: int) -> str:
-    profile = await _ensure_profile(user_id)
-    return profile["profile_id"]
-
+# --------------------------------------------------------------------------- #
+#                        ДЕНЬГИ / ЛОКАЦИЯ / СТАТЫ                              #
+# --------------------------------------------------------------------------- #
 
 async def set_location(user_id: int, location: str) -> None:
     pid = await _pid_of(user_id)
@@ -369,16 +382,34 @@ async def inc_losses(user_id: int, amount: int = 1) -> None:
         )
 
 
+# --------------------------------------------------------------------------- #
+#                                  ПОКЕМОНЫ                                    #
+# --------------------------------------------------------------------------- #
+
 async def add_pokemon(user_id: int, mon: dict[str, Any], to_party: bool = False) -> bool:
+    """Добавляет в активный профиль игрока."""
     pid = await _pid_of(user_id)
+    return await add_pokemon_by_profile(pid, mon, to_party=to_party)
+
+
+async def add_pokemon_by_profile(
+    profile_id: str, mon: dict[str, Any], to_party: bool = False
+) -> bool:
+    """Добавляет покемона в указанный profile_id (не в активный)."""
     pool = _pool_conn()
     async with pool.acquire() as conn:
+        exists = await conn.fetchval(
+            "SELECT 1 FROM profiles WHERE profile_id = $1", profile_id,
+        )
+        if not exists:
+            return False
+
         in_party = 0
         slot: Optional[int] = None
         if to_party:
             cnt = await conn.fetchval(
                 "SELECT COUNT(*) FROM pokemon WHERE profile_id = $1 AND in_party = 1",
-                pid,
+                profile_id,
             )
             if cnt < MAX_PARTY_SIZE:
                 in_party = 1
@@ -389,7 +420,7 @@ async def add_pokemon(user_id: int, mon: dict[str, Any], to_party: bool = False)
             "INSERT INTO pokemon "
             "(instance_id, profile_id, species_id, nickname, level, gender, moves, ability, in_party, slot) "
             "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
-            mon["instance_id"], pid, int(mon["species_id"]),
+            mon["instance_id"], profile_id, int(mon["species_id"]),
             mon.get("nickname"), int(mon.get("level", 5)),
             mon.get("gender", "genderless"), moves_json,
             mon.get("ability"), in_party, slot,
@@ -404,6 +435,17 @@ async def remove_pokemon(user_id: int, instance_id: str) -> bool:
         result = await conn.execute(
             "DELETE FROM pokemon WHERE profile_id = $1 AND instance_id = $2",
             pid, instance_id,
+        )
+    return result.endswith("1")
+
+
+async def remove_pokemon_by_profile(profile_id: str, instance_id: str) -> bool:
+    """Удаляет покемона из указанного profile_id."""
+    pool = _pool_conn()
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            "DELETE FROM pokemon WHERE profile_id = $1 AND instance_id = $2",
+            profile_id, instance_id,
         )
     return result.endswith("1")
 
@@ -458,6 +500,7 @@ async def move_pokemon(user_id: int, instance_id: str, to_party: bool) -> tuple[
 
 
 async def update_pokemon(user_id: int, instance_id: str, **fields: Any) -> bool:
+    """Обновляет покемона в активном профиле игрока."""
     if not fields:
         return False
     if "moves" in fields and not isinstance(fields["moves"], str):
@@ -480,6 +523,31 @@ async def update_pokemon(user_id: int, instance_id: str, **fields: Any) -> bool:
     return result.endswith("1")
 
 
+async def update_pokemon_by_profile(
+    profile_id: str, instance_id: str, **fields: Any
+) -> bool:
+    """Обновляет покемона в конкретном profile_id."""
+    if not fields:
+        return False
+    if "moves" in fields and not isinstance(fields["moves"], str):
+        fields["moves"] = json.dumps(fields["moves"], ensure_ascii=False)
+    allowed = {"nickname", "level", "gender", "moves", "species_id", "ability"}
+    update_fields = {k: v for k, v in fields.items() if k in allowed}
+    if not update_fields:
+        return False
+
+    set_clause = ", ".join(f"{k} = ${i+1}" for i, k in enumerate(update_fields))
+    values = list(update_fields.values()) + [profile_id, instance_id]
+    pool = _pool_conn()
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            f"UPDATE pokemon SET {set_clause} "
+            f"WHERE profile_id = ${len(values)-1} AND instance_id = ${len(values)}",
+            *values,
+        )
+    return result.endswith("1")
+
+
 async def get_pokemon(user_id: int, instance_id: str) -> Optional[dict[str, Any]]:
     pid = await _pid_of(user_id)
     pool = _pool_conn()
@@ -491,6 +559,37 @@ async def get_pokemon(user_id: int, instance_id: str) -> Optional[dict[str, Any]
     return _pokemon_dict(row) if row else None
 
 
+async def get_pokemon_by_profile(
+    profile_id: str, instance_id: str
+) -> Optional[dict[str, Any]]:
+    pool = _pool_conn()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM pokemon WHERE profile_id = $1 AND instance_id = $2",
+            profile_id, instance_id,
+        )
+    return _pokemon_dict(row) if row else None
+
+
+async def find_pokemon_anywhere(
+    user_id: int, instance_id: str
+) -> Optional[dict[str, Any]]:
+    """Ищет покемона у игрока в любом его профиле (активном или нет)."""
+    pool = _pool_conn()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT p.* FROM pokemon p "
+            "JOIN profiles pr ON pr.profile_id = p.profile_id "
+            "WHERE pr.user_id = $1 AND p.instance_id = $2",
+            user_id, instance_id,
+        )
+    return _pokemon_dict(row) if row else None
+
+
+# --------------------------------------------------------------------------- #
+#                                  ИНВЕНТАРЬ                                   #
+# --------------------------------------------------------------------------- #
+
 async def add_item(user_id: int, item_key: str, qty: int) -> None:
     pid = await _pid_of(user_id)
     pool = _pool_conn()
@@ -501,6 +600,23 @@ async def add_item(user_id: int, item_key: str, qty: int) -> None:
             "SET qty = inventory.qty + EXCLUDED.qty",
             pid, item_key, qty,
         )
+
+
+async def add_item_by_profile(profile_id: str, item_key: str, qty: int) -> bool:
+    pool = _pool_conn()
+    async with pool.acquire() as conn:
+        exists = await conn.fetchval(
+            "SELECT 1 FROM profiles WHERE profile_id = $1", profile_id,
+        )
+        if not exists:
+            return False
+        await conn.execute(
+            "INSERT INTO inventory (profile_id, item_key, qty) VALUES ($1, $2, $3) "
+            "ON CONFLICT (profile_id, item_key) DO UPDATE "
+            "SET qty = inventory.qty + EXCLUDED.qty",
+            profile_id, item_key, qty,
+        )
+    return True
 
 
 async def get_item_qty(user_id: int, item_key: str) -> int:
@@ -526,19 +642,32 @@ async def take_item(user_id: int, item_key: str, qty: int = 1) -> bool:
     return result.endswith("1")
 
 
+# --------------------------------------------------------------------------- #
+#                                  ПОКЕДЕКС                                    #
+# --------------------------------------------------------------------------- #
+
 async def add_to_pokedex(user_id: int, species_id: int) -> bool:
     pid = await _pid_of(user_id)
+    return await add_to_pokedex_by_profile(pid, species_id)
+
+
+async def add_to_pokedex_by_profile(profile_id: str, species_id: int) -> bool:
     pool = _pool_conn()
     async with pool.acquire() as conn:
         result = await conn.execute(
             "INSERT INTO pokedex (profile_id, species_id) VALUES ($1, $2) "
             "ON CONFLICT (profile_id, species_id) DO NOTHING",
-            pid, int(species_id),
+            profile_id, int(species_id),
         )
     return result.endswith("1")
 
 
+# --------------------------------------------------------------------------- #
+#                                    СБРОС                                     #
+# --------------------------------------------------------------------------- #
+
 async def reset_trainer(user_id: int) -> None:
+    """Сбрасывает активный профиль (не удаляет)."""
     pid = await _pid_of(user_id)
     pool = _pool_conn()
     async with pool.acquire() as conn:
