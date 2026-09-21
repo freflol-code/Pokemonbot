@@ -12,19 +12,27 @@ import pokeapi_client
 from database import (
     MAX_PARTY_SIZE,
     add_item,
+    add_item_by_profile,
     add_pokebucks,
     add_pokemon,
+    add_pokemon_by_profile,
     add_to_pokedex,
+    add_to_pokedex_by_profile,
     get_item_qty,
     get_pokemon,
+    get_pokemon_by_profile,
+    get_profile,
     get_trainer,
     inc_losses,
     inc_wins,
+    list_profiles,
     remove_pokemon,
+    remove_pokemon_by_profile,
     update_pokemon,
+    update_pokemon_by_profile,
 )
 from pokeapi_client import PokeAPIError
-from utils import EMBED_COLOR, format_ability, format_moves, load_species, mon_title
+from utils import EMBED_COLOR, format_moves, load_species, mon_title
 
 log = logging.getLogger(__name__)
 
@@ -102,17 +110,69 @@ async def _species_autocomplete(
     return out
 
 
-async def _instance_autocomplete(
+async def _profile_autocomplete(
     interaction: discord.Interaction, current: str
 ):
+    """Подсказывает профили выбранного игрока."""
     user: Optional[discord.Member] = interaction.namespace.user
     if user is None:
         return []
-    t = await get_trainer(user.id)
+    profiles = await list_profiles(user.id)
+    cur = current.strip().lower()
+    out = []
+    for p in profiles:
+        if p["profile_type"] == "pokemon":
+            label = f"🐾 {p['name']} • Ур.{p.get('level') or '?'}"
+        else:
+            label = f"🎓 {p['name']}"
+        if p["is_active"]:
+            label = "🟢 " + label
+        if not cur or cur in label.lower() or cur in p["profile_id"]:
+            out.append(app_commands.Choice(name=label[:100], value=p["profile_id"]))
+        if len(out) >= 25:
+            break
+    return out
+
+
+async def _instance_autocomplete(
+    interaction: discord.Interaction, current: str
+):
+    """ID покемонов выбранного игрока — с учётом profile_id, если он указан."""
+    user: Optional[discord.Member] = interaction.namespace.user
+    if user is None:
+        return []
+    profile_id = (interaction.namespace.profile_id or "").strip() if hasattr(interaction.namespace, "profile_id") else ""
+
+    if profile_id:
+        profile = await get_profile(profile_id)
+        if not profile or profile["user_id"] != user.id:
+            return []
+        t = {
+            "party": [],
+            "pc": [],
+        }
+        # Достаём покемонов конкретного профиля
+        from database import _pool_conn  # локальный импорт, чтобы не плодить публичные функции
+        pool = _pool_conn()
+        async with pool.acquire() as conn:
+            party_rows = await conn.fetch(
+                "SELECT * FROM pokemon WHERE profile_id = $1 AND in_party = 1 "
+                "ORDER BY slot ASC, instance_id ASC", profile_id,
+            )
+            pc_rows = await conn.fetch(
+                "SELECT * FROM pokemon WHERE profile_id = $1 AND in_party = 0 "
+                "ORDER BY instance_id ASC", profile_id,
+            )
+        from database import _pokemon_dict
+        t["party"] = [_pokemon_dict(r) for r in party_rows]
+        t["pc"] = [_pokemon_dict(r) for r in pc_rows]
+    else:
+        t = await get_trainer(user.id)
+
     cur = current.strip().lower()
     out = []
     for where, mon in (
-        [("К", m) for m in t["party"]] + [("П", m) for m in t["pc"]]
+        [("К", m) for m in t.get("party", [])] + [("П", m) for m in t.get("pc", [])]
     ):
         sid = mon["species_id"]
         nick_part = mon.get("nickname") or f"#{sid}"
@@ -127,7 +187,6 @@ async def _instance_autocomplete(
 async def _item_autocomplete(
     interaction: discord.Interaction, current: str
 ):
-    """Подсказывает ключи предметов из каталога."""
     try:
         from cogs.inventory import ITEMS
     except Exception:
@@ -174,7 +233,7 @@ class Admin(commands.Cog):
 
     @app_commands.command(
         name="give",
-        description="[Мастер] Выдать игроку покемона (в команду, если есть место, иначе в ПК)",
+        description="[Мастер] Выдать покемона игроку (в активный или указанный профиль)",
     )
     @app_commands.describe(
         user="Кому выдать покемона",
@@ -184,10 +243,13 @@ class Admin(commands.Cog):
         nickname="Кличка (необязательно)",
         moves="Атаки через запятую, 1–4 (не укажете — 4 случайные)",
         ability="Способность. Не укажете — выберется случайная обычная.",
+        profile_id="Конкретный персонаж (если нужно выдать не активному)",
     )
     @app_commands.choices(gender=GENDER_CHOICES)
     @is_master()
-    @app_commands.autocomplete(species=_species_autocomplete)
+    @app_commands.autocomplete(
+        species=_species_autocomplete, profile_id=_profile_autocomplete
+    )
     async def give_pokemon(
         self,
         interaction: discord.Interaction,
@@ -198,6 +260,7 @@ class Admin(commands.Cog):
         nickname: Optional[str] = None,
         moves: Optional[str] = None,
         ability: Optional[str] = None,
+        profile_id: Optional[str] = None,
     ) -> None:
         await interaction.response.defer(ephemeral=True)
 
@@ -238,8 +301,31 @@ class Admin(commands.Cog):
             await interaction.followup.send("❌ Кличка не длиннее 20 символов.", ephemeral=True)
             return
 
-        trainer = await get_trainer(user.id)
-        to_party = len(trainer["party"]) < MAX_PARTY_SIZE
+        # Определяем целевой профиль
+        if profile_id:
+            target_profile = await get_profile(profile_id.strip())
+            if not target_profile or target_profile["user_id"] != user.id:
+                await interaction.followup.send(
+                    "❌ Профиль с таким ID не найден у указанного игрока.", ephemeral=True
+                )
+                return
+            profile_name = f"{target_profile['name']} (`{target_profile['profile_id']}`)"
+            profile_type = target_profile["profile_type"]
+        else:
+            trainer = await get_trainer(user.id)
+            target_profile = trainer
+            profile_name = f"{trainer['name']} (активный)"
+            profile_type = trainer["profile_type"]
+
+        if profile_type == "pokemon":
+            await interaction.followup.send(
+                f"❌ **{target_profile['name']}** — это покемон. Ему нельзя выдать покемона.",
+                ephemeral=True,
+            )
+            return
+
+        party_len = len(target_profile.get("party", []))
+        to_party = party_len < MAX_PARTY_SIZE
 
         mon = {
             "instance_id": uuid.uuid4().hex[:8],
@@ -250,12 +336,19 @@ class Admin(commands.Cog):
             "moves": final_moves,
             "ability": final_ability,
         }
-        added_to_party = await add_pokemon(user.id, mon, to_party=to_party)
-        await add_to_pokedex(user.id, data["id"])
+
+        if profile_id:
+            added_to_party = await add_pokemon_by_profile(
+                target_profile["profile_id"], mon, to_party=to_party
+            )
+            await add_to_pokedex_by_profile(target_profile["profile_id"], data["id"])
+        else:
+            added_to_party = await add_pokemon(user.id, mon, to_party=to_party)
+            await add_to_pokedex(user.id, data["id"])
 
         species_data = await load_species([mon])
         title = mon_title(mon, species_data)
-        place = "команду" if added_to_party else "ПК"
+        place = "команда" if added_to_party else "ПК"
         ability_ru = (
             await pokeapi_client.get_ability_ru(final_ability) if final_ability else "—"
         )
@@ -264,6 +357,7 @@ class Admin(commands.Cog):
             title="✅ Покемон выдан",
             description=(
                 f"**Игрок:** {user.mention}\n"
+                f"**Персонаж:** {profile_name}\n"
                 f"**Покемон:** {title}\n"
                 f"**Уровень:** {mon['level']}\n"
                 f"**Пол:** {mon_gender} ({gender_source})\n"
@@ -280,7 +374,8 @@ class Admin(commands.Cog):
 
         try:
             await user.send(
-                f"🎁 Мастер выдал вам **{title}** (Ур. {mon['level']})!\n"
+                f"🎁 Мастер выдал вам **{title}** (Ур. {mon['level']}) "
+                f"персонажу **{target_profile['name']}**!\n"
                 f"Он {'в команде' if added_to_party else 'лежит в ПК'}."
             )
         except discord.Forbidden:
@@ -289,21 +384,50 @@ class Admin(commands.Cog):
     # ------------------------------------------------------------------ /gm_delete
 
     @app_commands.command(name="gm_delete", description="[Мастер] Удалить покемона у игрока")
-    @app_commands.describe(user="Владелец покемона", instance_id="ID покемона")
+    @app_commands.describe(
+        user="Владелец покемона",
+        instance_id="ID покемона",
+        profile_id="Профиль (если покемон у неактивного персонажа)",
+    )
     @is_master()
-    @app_commands.autocomplete(instance_id=_instance_autocomplete)
+    @app_commands.autocomplete(
+        instance_id=_instance_autocomplete, profile_id=_profile_autocomplete
+    )
     async def gm_delete(
         self, interaction: discord.Interaction,
         user: discord.Member, instance_id: str,
+        profile_id: Optional[str] = None,
     ) -> None:
         iid = instance_id.strip().lower()
-        mon = await get_pokemon(user.id, iid)
-        if not mon:
-            await interaction.response.send_message("❌ Покемон не найден.", ephemeral=True)
-            return
-        species = await load_species([mon])
-        title = mon_title(mon, species)
-        await remove_pokemon(user.id, iid)
+
+        if profile_id:
+            pid = profile_id.strip()
+            profile = await get_profile(pid)
+            if not profile or profile["user_id"] != user.id:
+                await interaction.response.send_message(
+                    "❌ Профиль не найден у игрока.", ephemeral=True
+                )
+                return
+            mon = await get_pokemon_by_profile(pid, iid)
+            if not mon:
+                await interaction.response.send_message(
+                    "❌ Покемон не найден в этом профиле.", ephemeral=True
+                )
+                return
+            species = await load_species([mon])
+            title = mon_title(mon, species)
+            await remove_pokemon_by_profile(pid, iid)
+        else:
+            mon = await get_pokemon(user.id, iid)
+            if not mon:
+                await interaction.response.send_message(
+                    "❌ Покемон не найден в активном профиле.", ephemeral=True
+                )
+                return
+            species = await load_species([mon])
+            title = mon_title(mon, species)
+            await remove_pokemon(user.id, iid)
+
         embed = discord.Embed(
             title="🗑️ Покемон удалён",
             description=f"**Игрок:** {user.mention}\n**Покемон:** {title}\n**ID:** `{iid}`",
@@ -314,16 +438,26 @@ class Admin(commands.Cog):
     # ------------------------------------------------------------------ /gm_set_level
 
     @app_commands.command(name="gm_set_level", description="[Мастер] Изменить уровень покемона")
-    @app_commands.describe(user="Владелец", instance_id="ID покемона", level="Новый уровень (1–100)")
+    @app_commands.describe(
+        user="Владелец", instance_id="ID покемона",
+        level="Новый уровень (1–100)",
+        profile_id="Профиль (если покемон у неактивного персонажа)",
+    )
     @is_master()
-    @app_commands.autocomplete(instance_id=_instance_autocomplete)
+    @app_commands.autocomplete(
+        instance_id=_instance_autocomplete, profile_id=_profile_autocomplete
+    )
     async def gm_set_level(
         self, interaction: discord.Interaction,
         user: discord.Member, instance_id: str,
         level: app_commands.Range[int, 1, 100],
+        profile_id: Optional[str] = None,
     ) -> None:
         iid = instance_id.strip().lower()
-        ok = await update_pokemon(user.id, iid, level=int(level))
+        if profile_id:
+            ok = await update_pokemon_by_profile(profile_id.strip(), iid, level=int(level))
+        else:
+            ok = await update_pokemon(user.id, iid, level=int(level))
         if not ok:
             await interaction.response.send_message("❌ Покемон не найден.", ephemeral=True)
             return
@@ -335,14 +469,23 @@ class Admin(commands.Cog):
 
     @app_commands.command(
         name="gm_set_species",
-        description="[Мастер] Изменить вид покемона (например, при эволюции)",
+        description="[Мастер] Изменить вид покемона",
     )
-    @app_commands.describe(user="Владелец", instance_id="ID покемона", species="Новый вид (имя или #номер)")
+    @app_commands.describe(
+        user="Владелец", instance_id="ID покемона",
+        species="Новый вид (имя или #номер)",
+        profile_id="Профиль (если покемон у неактивного персонажа)",
+    )
     @is_master()
-    @app_commands.autocomplete(instance_id=_instance_autocomplete, species=_species_autocomplete)
+    @app_commands.autocomplete(
+        instance_id=_instance_autocomplete,
+        species=_species_autocomplete,
+        profile_id=_profile_autocomplete,
+    )
     async def gm_set_species(
         self, interaction: discord.Interaction,
         user: discord.Member, instance_id: str, species: str,
+        profile_id: Optional[str] = None,
     ) -> None:
         await interaction.response.defer(ephemeral=True)
         try:
@@ -351,12 +494,23 @@ class Admin(commands.Cog):
             await interaction.followup.send(f"❌ {e}", ephemeral=True)
             return
         iid = instance_id.strip().lower()
-        old = await get_pokemon(user.id, iid)
-        if not old:
-            await interaction.followup.send("❌ Покемон не найден.", ephemeral=True)
-            return
-        await update_pokemon(user.id, iid, species_id=data["id"])
-        await add_to_pokedex(user.id, data["id"])
+
+        if profile_id:
+            pid = profile_id.strip()
+            old = await get_pokemon_by_profile(pid, iid)
+            if not old:
+                await interaction.followup.send("❌ Покемон не найден.", ephemeral=True)
+                return
+            await update_pokemon_by_profile(pid, iid, species_id=data["id"])
+            await add_to_pokedex_by_profile(pid, data["id"])
+        else:
+            old = await get_pokemon(user.id, iid)
+            if not old:
+                await interaction.followup.send("❌ Покемон не найден.", ephemeral=True)
+                return
+            await update_pokemon(user.id, iid, species_id=data["id"])
+            await add_to_pokedex(user.id, data["id"])
+
         embed = discord.Embed(
             title="🧬 Вид покемона изменён",
             description=(
@@ -374,12 +528,19 @@ class Admin(commands.Cog):
     # ------------------------------------------------------------------ /gm_set_moves
 
     @app_commands.command(name="gm_set_moves", description="[Мастер] Изменить атаки покемона")
-    @app_commands.describe(user="Владелец", instance_id="ID покемона", moves="Атаки через запятую, 1–4")
+    @app_commands.describe(
+        user="Владелец", instance_id="ID покемона",
+        moves="Атаки через запятую, 1–4",
+        profile_id="Профиль (если покемон у неактивного персонажа)",
+    )
     @is_master()
-    @app_commands.autocomplete(instance_id=_instance_autocomplete)
+    @app_commands.autocomplete(
+        instance_id=_instance_autocomplete, profile_id=_profile_autocomplete
+    )
     async def gm_set_moves(
         self, interaction: discord.Interaction,
         user: discord.Member, instance_id: str, moves: str,
+        profile_id: Optional[str] = None,
     ) -> None:
         parsed = [m.strip().lower().replace(" ", "-") for m in moves.split(",") if m.strip()]
         if not (1 <= len(parsed) <= 4):
@@ -388,7 +549,10 @@ class Admin(commands.Cog):
             )
             return
         iid = instance_id.strip().lower()
-        ok = await update_pokemon(user.id, iid, moves=parsed)
+        if profile_id:
+            ok = await update_pokemon_by_profile(profile_id.strip(), iid, moves=parsed)
+        else:
+            ok = await update_pokemon(user.id, iid, moves=parsed)
         if not ok:
             await interaction.response.send_message("❌ Покемон не найден.", ephemeral=True)
             return
@@ -399,16 +563,26 @@ class Admin(commands.Cog):
     # ------------------------------------------------------------------ /gm_set_nick
 
     @app_commands.command(name="gm_set_nick", description="[Мастер] Изменить кличку покемона")
-    @app_commands.describe(user="Владелец", instance_id="ID покемона", nickname="Кличка до 20 символов ('-' — сбросить)")
+    @app_commands.describe(
+        user="Владелец", instance_id="ID покемона",
+        nickname="Кличка до 20 символов ('-' — сбросить)",
+        profile_id="Профиль (если покемон у неактивного персонажа)",
+    )
     @is_master()
-    @app_commands.autocomplete(instance_id=_instance_autocomplete)
+    @app_commands.autocomplete(
+        instance_id=_instance_autocomplete, profile_id=_profile_autocomplete
+    )
     async def gm_set_nick(
         self, interaction: discord.Interaction,
         user: discord.Member, instance_id: str, nickname: str,
+        profile_id: Optional[str] = None,
     ) -> None:
         new_value = None if nickname.strip() in ("", "-") else nickname.strip()[:20]
         iid = instance_id.strip().lower()
-        ok = await update_pokemon(user.id, iid, nickname=new_value)
+        if profile_id:
+            ok = await update_pokemon_by_profile(profile_id.strip(), iid, nickname=new_value)
+        else:
+            ok = await update_pokemon(user.id, iid, nickname=new_value)
         if not ok:
             await interaction.response.send_message("❌ Покемон не найден.", ephemeral=True)
             return
@@ -420,17 +594,27 @@ class Admin(commands.Cog):
     # ------------------------------------------------------------------ /gm_set_gender
 
     @app_commands.command(name="gm_set_gender", description="[Мастер] Изменить пол покемона")
-    @app_commands.describe(user="Владелец", instance_id="ID покемона", gender="Новый пол")
+    @app_commands.describe(
+        user="Владелец", instance_id="ID покемона",
+        gender="Новый пол",
+        profile_id="Профиль (если покемон у неактивного персонажа)",
+    )
     @app_commands.choices(gender=GENDER_CHOICES)
     @is_master()
-    @app_commands.autocomplete(instance_id=_instance_autocomplete)
+    @app_commands.autocomplete(
+        instance_id=_instance_autocomplete, profile_id=_profile_autocomplete
+    )
     async def gm_set_gender(
         self, interaction: discord.Interaction,
         user: discord.Member, instance_id: str,
         gender: app_commands.Choice[str],
+        profile_id: Optional[str] = None,
     ) -> None:
         iid = instance_id.strip().lower()
-        ok = await update_pokemon(user.id, iid, gender=gender.value)
+        if profile_id:
+            ok = await update_pokemon_by_profile(profile_id.strip(), iid, gender=gender.value)
+        else:
+            ok = await update_pokemon(user.id, iid, gender=gender.value)
         if not ok:
             await interaction.response.send_message("❌ Покемон не найден.", ephemeral=True)
             return
@@ -440,7 +624,10 @@ class Admin(commands.Cog):
 
     # ------------------------------------------------------------------ /give_money
 
-    @app_commands.command(name="give_money", description="[Мастер] Выдать или забрать Pokébucks")
+    @app_commands.command(
+        name="give_money",
+        description="[Мастер] Выдать или забрать Pokébucks у игрока (в активный профиль)",
+    )
     @app_commands.describe(user="Кому", amount="Сумма (+ выдать, − забрать)")
     @is_master()
     async def give_money(
@@ -464,7 +651,7 @@ class Admin(commands.Cog):
 
     @app_commands.command(
         name="give_item",
-        description="[Мастер] Выдать игроку предмет из каталога",
+        description="[Мастер] Выдать игроку предмет из каталога (в активный профиль)",
     )
     @app_commands.describe(
         user="Кому выдать",
@@ -485,8 +672,7 @@ class Admin(commands.Cog):
         key = item.strip().lower().replace(" ", "_")
         if key not in ITEMS:
             await interaction.response.send_message(
-                f"❌ Предмет `{key}` не найден в каталоге. "
-                f"Начните печатать название — бот подскажет.",
+                f"❌ Предмет `{key}` не найден в каталоге.",
                 ephemeral=True,
             )
             return
@@ -508,7 +694,7 @@ class Admin(commands.Cog):
 
     # ------------------------------------------------------------------ /gm_win, /gm_lose
 
-    @app_commands.command(name="gm_win", description="[Мастер] Начислить игроку победы")
+    @app_commands.command(name="gm_win", description="[Мастер] Начислить победы активному профилю")
     @app_commands.describe(user="Кому", amount="Сколько побед (по умолчанию 1)")
     @is_master()
     async def gm_win(
@@ -522,6 +708,7 @@ class Admin(commands.Cog):
             title="🏆 Победы засчитаны",
             description=(
                 f"**Игрок:** {user.mention}\n"
+                f"**Персонаж:** {t['name']}\n"
                 f"**Начислено:** +{amount}\n"
                 f"**Побед:** {t['wins']} • **Поражений:** {t['losses']}"
             ),
@@ -529,7 +716,7 @@ class Admin(commands.Cog):
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @app_commands.command(name="gm_lose", description="[Мастер] Начислить игроку поражения")
+    @app_commands.command(name="gm_lose", description="[Мастер] Начислить поражения активному профилю")
     @app_commands.describe(user="Кому", amount="Сколько поражений (по умолчанию 1)")
     @is_master()
     async def gm_lose(
@@ -543,6 +730,7 @@ class Admin(commands.Cog):
             title="💔 Поражения засчитаны",
             description=(
                 f"**Игрок:** {user.mention}\n"
+                f"**Персонаж:** {t['name']}\n"
                 f"**Начислено:** +{amount}\n"
                 f"**Побед:** {t['wins']} • **Поражений:** {t['losses']}"
             ),
