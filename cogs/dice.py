@@ -8,8 +8,6 @@ from discord.ext import commands
 import battle_math
 
 
-# Шанс крита в зависимости от стадии (cr).
-# 0 → 6% (база), +1 → 12%, +2 → 50%, +3 и выше → 100%
 CRIT_CHANCES = {
     0: 6.25,
     1: 12.5,
@@ -57,7 +55,6 @@ class Dice(commands.Cog):
         roll = random.randint(1, 100)
         hit = roll <= round(chance * 100)
 
-        # Крит считается только если атака попала
         crit = hit and _roll_crit(cr)
 
         lines = [f"**{interaction.user.display_name}** атакует…", ""]
