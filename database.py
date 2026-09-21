@@ -296,7 +296,6 @@ async def _pid_of(user_id: int) -> str:
 # --------------------------------------------------------------------------- #
 
 async def get_trainer(user_id: int) -> dict[str, Any]:
-    """Возвращает активный профиль + партию + ПК + инвентарь + покедекс."""
     profile = await _ensure_profile(user_id)
     pid = profile["profile_id"]
 
@@ -325,6 +324,37 @@ async def get_trainer(user_id: int) -> dict[str, Any]:
     return trainer
 
 
+async def get_profile_full(profile_id: str) -> Optional[dict[str, Any]]:
+    """Возвращает профиль с партией, ПК, инвентарём и покедексом по его ID."""
+    profile = await get_profile(profile_id)
+    if not profile:
+        return None
+
+    pool = _pool_conn()
+    async with pool.acquire() as conn:
+        party_rows = await conn.fetch(
+            "SELECT * FROM pokemon WHERE profile_id = $1 AND in_party = 1 "
+            "ORDER BY slot ASC, instance_id ASC", profile_id,
+        )
+        pc_rows = await conn.fetch(
+            "SELECT * FROM pokemon WHERE profile_id = $1 AND in_party = 0 "
+            "ORDER BY instance_id ASC", profile_id,
+        )
+        inv_rows = await conn.fetch(
+            "SELECT item_key, qty FROM inventory WHERE profile_id = $1", profile_id,
+        )
+        dex_rows = await conn.fetch(
+            "SELECT species_id FROM pokedex WHERE profile_id = $1", profile_id,
+        )
+
+    trainer = dict(profile)
+    trainer["party"] = [_pokemon_dict(r) for r in party_rows]
+    trainer["pc"] = [_pokemon_dict(r) for r in pc_rows]
+    trainer["inventory"] = {r["item_key"]: r["qty"] for r in inv_rows}
+    trainer["pokedex_known"] = [r["species_id"] for r in dex_rows]
+    return trainer
+
+
 # --------------------------------------------------------------------------- #
 #                        ДЕНЬГИ / ЛОКАЦИЯ / СТАТЫ                              #
 # --------------------------------------------------------------------------- #
@@ -339,16 +369,25 @@ async def set_location(user_id: int, location: str) -> None:
 
 
 async def add_pokebucks(user_id: int, amount: int) -> int:
+    """Начисляет деньги активному профилю."""
     pid = await _pid_of(user_id)
+    return await add_pokebucks_by_profile(pid, amount)
+
+
+async def add_pokebucks_by_profile(profile_id: str, amount: int) -> int:
+    """Начисляет деньги указанному профилю. Возвращает новый баланс."""
     pool = _pool_conn()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT pokebucks FROM profiles WHERE profile_id = $1", pid,
+            "SELECT pokebucks FROM profiles WHERE profile_id = $1", profile_id,
         )
-        current = row["pokebucks"] if row else 0
+        if row is None:
+            return 0
+        current = row["pokebucks"]
         new_value = max(0, current + int(amount))
         await conn.execute(
-            "UPDATE profiles SET pokebucks = $1 WHERE profile_id = $2", new_value, pid,
+            "UPDATE profiles SET pokebucks = $1 WHERE profile_id = $2",
+            new_value, profile_id,
         )
     return new_value
 
@@ -365,21 +404,35 @@ async def spend_pokebucks(user_id: int, cost: int) -> bool:
 
 
 async def inc_wins(user_id: int, amount: int = 1) -> None:
+    """Начисляет победы активному профилю."""
     pid = await _pid_of(user_id)
+    await inc_wins_by_profile(pid, amount)
+
+
+async def inc_wins_by_profile(profile_id: str, amount: int = 1) -> bool:
     pool = _pool_conn()
     async with pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE profiles SET wins = wins + $1 WHERE profile_id = $2", amount, pid,
+        result = await conn.execute(
+            "UPDATE profiles SET wins = wins + $1 WHERE profile_id = $2",
+            amount, profile_id,
         )
+    return result.endswith("1")
 
 
 async def inc_losses(user_id: int, amount: int = 1) -> None:
+    """Начисляет поражения активному профилю."""
     pid = await _pid_of(user_id)
+    await inc_losses_by_profile(pid, amount)
+
+
+async def inc_losses_by_profile(profile_id: str, amount: int = 1) -> bool:
     pool = _pool_conn()
     async with pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE profiles SET losses = losses + $1 WHERE profile_id = $2", amount, pid,
+        result = await conn.execute(
+            "UPDATE profiles SET losses = losses + $1 WHERE profile_id = $2",
+            amount, profile_id,
         )
+    return result.endswith("1")
 
 
 # --------------------------------------------------------------------------- #
@@ -387,7 +440,6 @@ async def inc_losses(user_id: int, amount: int = 1) -> None:
 # --------------------------------------------------------------------------- #
 
 async def add_pokemon(user_id: int, mon: dict[str, Any], to_party: bool = False) -> bool:
-    """Добавляет в активный профиль игрока."""
     pid = await _pid_of(user_id)
     return await add_pokemon_by_profile(pid, mon, to_party=to_party)
 
@@ -395,7 +447,6 @@ async def add_pokemon(user_id: int, mon: dict[str, Any], to_party: bool = False)
 async def add_pokemon_by_profile(
     profile_id: str, mon: dict[str, Any], to_party: bool = False
 ) -> bool:
-    """Добавляет покемона в указанный profile_id (не в активный)."""
     pool = _pool_conn()
     async with pool.acquire() as conn:
         exists = await conn.fetchval(
@@ -430,17 +481,10 @@ async def add_pokemon_by_profile(
 
 async def remove_pokemon(user_id: int, instance_id: str) -> bool:
     pid = await _pid_of(user_id)
-    pool = _pool_conn()
-    async with pool.acquire() as conn:
-        result = await conn.execute(
-            "DELETE FROM pokemon WHERE profile_id = $1 AND instance_id = $2",
-            pid, instance_id,
-        )
-    return result.endswith("1")
+    return await remove_pokemon_by_profile(pid, instance_id)
 
 
 async def remove_pokemon_by_profile(profile_id: str, instance_id: str) -> bool:
-    """Удаляет покемона из указанного profile_id."""
     pool = _pool_conn()
     async with pool.acquire() as conn:
         result = await conn.execute(
@@ -500,33 +544,13 @@ async def move_pokemon(user_id: int, instance_id: str, to_party: bool) -> tuple[
 
 
 async def update_pokemon(user_id: int, instance_id: str, **fields: Any) -> bool:
-    """Обновляет покемона в активном профиле игрока."""
-    if not fields:
-        return False
-    if "moves" in fields and not isinstance(fields["moves"], str):
-        fields["moves"] = json.dumps(fields["moves"], ensure_ascii=False)
-    allowed = {"nickname", "level", "gender", "moves", "species_id", "ability"}
-    update_fields = {k: v for k, v in fields.items() if k in allowed}
-    if not update_fields:
-        return False
-
     pid = await _pid_of(user_id)
-    set_clause = ", ".join(f"{k} = ${i+1}" for i, k in enumerate(update_fields))
-    values = list(update_fields.values()) + [pid, instance_id]
-    pool = _pool_conn()
-    async with pool.acquire() as conn:
-        result = await conn.execute(
-            f"UPDATE pokemon SET {set_clause} "
-            f"WHERE profile_id = ${len(values)-1} AND instance_id = ${len(values)}",
-            *values,
-        )
-    return result.endswith("1")
+    return await update_pokemon_by_profile(pid, instance_id, **fields)
 
 
 async def update_pokemon_by_profile(
     profile_id: str, instance_id: str, **fields: Any
 ) -> bool:
-    """Обновляет покемона в конкретном profile_id."""
     if not fields:
         return False
     if "moves" in fields and not isinstance(fields["moves"], str):
@@ -550,13 +574,7 @@ async def update_pokemon_by_profile(
 
 async def get_pokemon(user_id: int, instance_id: str) -> Optional[dict[str, Any]]:
     pid = await _pid_of(user_id)
-    pool = _pool_conn()
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            "SELECT * FROM pokemon WHERE profile_id = $1 AND instance_id = $2",
-            pid, instance_id,
-        )
-    return _pokemon_dict(row) if row else None
+    return await get_pokemon_by_profile(pid, instance_id)
 
 
 async def get_pokemon_by_profile(
@@ -574,7 +592,6 @@ async def get_pokemon_by_profile(
 async def find_pokemon_anywhere(
     user_id: int, instance_id: str
 ) -> Optional[dict[str, Any]]:
-    """Ищет покемона у игрока в любом его профиле (активном или нет)."""
     pool = _pool_conn()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -592,14 +609,7 @@ async def find_pokemon_anywhere(
 
 async def add_item(user_id: int, item_key: str, qty: int) -> None:
     pid = await _pid_of(user_id)
-    pool = _pool_conn()
-    async with pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO inventory (profile_id, item_key, qty) VALUES ($1, $2, $3) "
-            "ON CONFLICT (profile_id, item_key) DO UPDATE "
-            "SET qty = inventory.qty + EXCLUDED.qty",
-            pid, item_key, qty,
-        )
+    await add_item_by_profile(pid, item_key, qty)
 
 
 async def add_item_by_profile(profile_id: str, item_key: str, qty: int) -> bool:
@@ -621,23 +631,31 @@ async def add_item_by_profile(profile_id: str, item_key: str, qty: int) -> bool:
 
 async def get_item_qty(user_id: int, item_key: str) -> int:
     pid = await _pid_of(user_id)
+    return await get_item_qty_by_profile(pid, item_key)
+
+
+async def get_item_qty_by_profile(profile_id: str, item_key: str) -> int:
     pool = _pool_conn()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT qty FROM inventory WHERE profile_id = $1 AND item_key = $2",
-            pid, item_key,
+            profile_id, item_key,
         )
     return row["qty"] if row else 0
 
 
 async def take_item(user_id: int, item_key: str, qty: int = 1) -> bool:
     pid = await _pid_of(user_id)
+    return await take_item_by_profile(pid, item_key, qty)
+
+
+async def take_item_by_profile(profile_id: str, item_key: str, qty: int = 1) -> bool:
     pool = _pool_conn()
     async with pool.acquire() as conn:
         result = await conn.execute(
             "UPDATE inventory SET qty = qty - $1 "
             "WHERE profile_id = $2 AND item_key = $3 AND qty >= $1",
-            qty, pid, item_key,
+            qty, profile_id, item_key,
         )
     return result.endswith("1")
 
@@ -667,7 +685,6 @@ async def add_to_pokedex_by_profile(profile_id: str, species_id: int) -> bool:
 # --------------------------------------------------------------------------- #
 
 async def reset_trainer(user_id: int) -> None:
-    """Сбрасывает активный профиль (не удаляет)."""
     pid = await _pid_of(user_id)
     pool = _pool_conn()
     async with pool.acquire() as conn:
