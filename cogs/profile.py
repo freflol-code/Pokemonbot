@@ -1,6 +1,4 @@
 """Профиль тренера и баланс."""
-from __future__ import annotations
-
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -14,13 +12,22 @@ class Profile(commands.Cog):
         self.bot = bot
 
     @app_commands.command(name="profile", description="Показать профиль тренера")
-    async def profile(self, interaction: discord.Interaction) -> None:
-        t = await get_trainer(interaction.user.id)
-        embed = discord.Embed(
-            title=f"Профиль тренера {interaction.user.display_name}",
-            color=EMBED_COLOR,
+    @app_commands.describe(user="Чей профиль посмотреть (по умолчанию — свой)")
+    async def profile(
+        self,
+        interaction: discord.Interaction,
+        user: discord.Member | None = None,
+    ) -> None:
+        target = user or interaction.user
+        t = await get_trainer(target.id)
+
+        title = (
+            f"Профиль тренера {target.display_name}"
+            if target.id == interaction.user.id
+            else f"Профиль тренера {target.display_name} (чужой)"
         )
-        embed.set_thumbnail(url=interaction.user.display_avatar.url)
+        embed = discord.Embed(title=title, color=EMBED_COLOR)
+        embed.set_thumbnail(url=target.display_avatar.url)
         embed.add_field(name="🏆 Победы", value=str(t["wins"]))
         embed.add_field(name="💔 Поражения", value=str(t["losses"]))
         embed.add_field(name="💰 Pokébucks", value=f"{t['pokebucks']:,}")
@@ -30,13 +37,21 @@ class Profile(commands.Cog):
         await interaction.response.send_message(embed=embed)
 
     @app_commands.command(name="balance", description="Показать баланс Pokébucks")
-    async def balance(self, interaction: discord.Interaction) -> None:
-        t = await get_trainer(interaction.user.id)
-        embed = discord.Embed(
-            title="💰 Баланс",
-            description=f"У вас **{t['pokebucks']:,}** Pokébucks",
-            color=EMBED_COLOR,
-        )
+    @app_commands.describe(user="Чей баланс посмотреть (по умолчанию — свой)")
+    async def balance(
+        self,
+        interaction: discord.Interaction,
+        user: discord.Member | None = None,
+    ) -> None:
+        target = user or interaction.user
+        t = await get_trainer(target.id)
+
+        if target.id == interaction.user.id:
+            desc = f"У вас **{t['pokebucks']:,}** Pokébucks"
+        else:
+            desc = f"У **{target.display_name}** — **{t['pokebucks']:,}** Pokébucks"
+
+        embed = discord.Embed(title="💰 Баланс", description=desc, color=EMBED_COLOR)
         await interaction.response.send_message(embed=embed)
 
 
