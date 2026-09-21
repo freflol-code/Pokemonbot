@@ -13,7 +13,7 @@ from database import (
     list_profiles,
     switch_profile,
 )
-from utils import EMBED_COLOR, format_ability, format_moves, load_species
+from utils import EMBED_COLOR, format_moves
 
 PROFILE_TYPE_CHOICES = [
     app_commands.Choice(name="🎓 Тренер", value="trainer"),
@@ -28,6 +28,12 @@ PROFILE_TYPE_LABEL = {
 STATUS_LABEL = {
     "wild": "🌿 Дикий",
     "caught": "🔴 Пойман",
+}
+
+GENDER_LABEL = {
+    "male": "♂️ Самец",
+    "female": "♀️ Самка",
+    "genderless": "⚪ Бесполый",
 }
 
 POKEBALL_LABEL = {
@@ -60,26 +66,10 @@ def _status_label(status: str | None, pokeball: str | None) -> str:
     return base
 
 
-async def _pokemon_profile_fields(profile: dict) -> dict[str, str]:
-    """Данные для эмбеда профиля-покемона: справочные значения."""
-    moves = profile.get("moves") or []
-    ability_en = profile.get("ability")
-
-    # Русское название способности (если есть)
-    ability_ru = ability_en
-    if ability_en:
-        try:
-            ability_ru = await pokeapi_client.get_ability_ru(ability_en)
-        except Exception:
-            ability_ru = ability_en
-
-    # Если у профиля не указан вид — пытаемся понять из имени (не обязательно)
-    return {
-        "level": str(profile.get("level") or "—"),
-        "ability": ability_ru or "—",
-        "moves": format_moves(moves) if moves else "—",
-        "status": _status_label(profile.get("status"), profile.get("pokeball")),
-    }
+def _gender_label(gender: str | None) -> str:
+    if not gender:
+        return "—"
+    return GENDER_LABEL.get(gender, gender)
 
 
 class Profile(commands.Cog):
@@ -99,11 +89,17 @@ class Profile(commands.Cog):
         level="Уровень (только для покемонов)",
         ability="Способность (только для покемонов), например blaze",
         moves="Атаки через запятую (только для покемонов), до 4",
+        gender="Пол (только для покемонов)",
         status="Статус покемона: wild (дикий) или caught (пойман)",
-        pokeball="В каком покеболе сидит (только если caught), например pokeball",
+        pokeball="В каком покеболе сидит (только если caught)",
     )
     @app_commands.choices(
         profile_type=PROFILE_TYPE_CHOICES,
+        gender=[
+            app_commands.Choice(name="♂️ Самец", value="male"),
+            app_commands.Choice(name="♀️ Самка", value="female"),
+            app_commands.Choice(name="⚪ Бесполый", value="genderless"),
+        ],
         status=[
             app_commands.Choice(name="🌿 Дикий", value="wild"),
             app_commands.Choice(name="🔴 Пойман", value="caught"),
@@ -118,6 +114,7 @@ class Profile(commands.Cog):
         level: app_commands.Range[int, 1, 100] | None = None,
         ability: str | None = None,
         moves: str | None = None,
+        gender: app_commands.Choice[str] | None = None,
         status: app_commands.Choice[str] | None = None,
         pokeball: str | None = None,
     ) -> None:
@@ -142,24 +139,29 @@ class Profile(commands.Cog):
                 return
             avatar_url = avatar.url
 
-        # Поля для покемона
         mon_level = None
         mon_ability = None
         mon_moves = None
         mon_status = None
         mon_ball = None
+        mon_gender = None
 
         if profile_type.value == "pokemon":
             mon_level = int(level) if level else 5
             mon_ability = (ability or "").strip().lower().replace(" ", "-") or None
             if moves:
-                parsed = [m.strip().lower().replace(" ", "-") for m in moves.split(",") if m.strip()]
+                parsed = [
+                    m.strip().lower().replace(" ", "-")
+                    for m in moves.split(",")
+                    if m.strip()
+                ]
                 if not (1 <= len(parsed) <= 4):
                     await interaction.response.send_message(
                         "❌ Укажите от 1 до 4 атак через запятую.", ephemeral=True
                     )
                     return
                 mon_moves = parsed
+            mon_gender = gender.value if gender else "genderless"
             mon_status = status.value if status else "wild"
             if mon_status == "caught":
                 mon_ball = (pokeball or "pokeball").strip().lower().replace(" ", "_")
@@ -175,6 +177,7 @@ class Profile(commands.Cog):
             ability=mon_ability,
             status=mon_status,
             pokeball=mon_ball,
+            gender=mon_gender,
         )
 
         embed = discord.Embed(
@@ -187,15 +190,18 @@ class Profile(commands.Cog):
             color=discord.Color.green(),
         )
         if profile_type.value == "pokemon":
-            embed.add_field(name="Уровень", value=str(profile.get("level") or "—"))
-            embed.add_field(name="Способность", value=profile.get("ability") or "—")
+            embed.add_field(name="🎚️ Уровень", value=str(profile.get("level") or "—"))
+            embed.add_field(name="🎭 Пол", value=_gender_label(profile.get("gender")))
             embed.add_field(
-                name="Атаки",
+                name="✨ Способность", value=profile.get("ability") or "—"
+            )
+            embed.add_field(
+                name="⚔️ Атаки",
                 value=format_moves(profile.get("moves") or []),
                 inline=False,
             )
             embed.add_field(
-                name="Статус",
+                name="🔴 Статус",
                 value=_status_label(profile.get("status"), profile.get("pokeball")),
                 inline=False,
             )
@@ -228,6 +234,7 @@ class Profile(commands.Cog):
             if p["profile_type"] == "pokemon":
                 detail = (
                     f"🐾 Покемон • Ур. {p.get('level') or '—'} • "
+                    f"{_gender_label(p.get('gender'))} • "
                     f"{_status_label(p.get('status'), p.get('pokeball'))}"
                 )
             else:
@@ -341,14 +348,28 @@ class Profile(commands.Cog):
             embed.set_thumbnail(url=active["avatar_url"])
 
         if active["profile_type"] == "pokemon":
-            # Профиль ПОКЕМОНА
-            fields = await _pokemon_profile_fields(active)
-            embed.add_field(name="🎚️ Уровень", value=fields["level"])
-            embed.add_field(name="✨ Способность", value=fields["ability"])
-            embed.add_field(name="⚔️ Атаки", value=fields["moves"], inline=False)
-            embed.add_field(name="🔴 Статус", value=fields["status"], inline=False)
+            # Русское название способности
+            ability_ru = active.get("ability") or "—"
+            if active.get("ability"):
+                try:
+                    ability_ru = await pokeapi_client.get_ability_ru(active["ability"])
+                except Exception:
+                    ability_ru = active["ability"]
+
+            embed.add_field(name="🎚️ Уровень", value=str(active.get("level") or "—"))
+            embed.add_field(name="🎭 Пол", value=_gender_label(active.get("gender")))
+            embed.add_field(name="✨ Способность", value=ability_ru)
+            embed.add_field(
+                name="⚔️ Атаки",
+                value=format_moves(active.get("moves") or []),
+                inline=False,
+            )
+            embed.add_field(
+                name="🔴 Статус",
+                value=_status_label(active.get("status"), active.get("pokeball")),
+                inline=False,
+            )
         else:
-            # Профиль ТРЕНЕРА
             t = await get_trainer(target.id)
             embed.add_field(name="🏆 Победы", value=str(t["wins"]))
             embed.add_field(name="💔 Поражения", value=str(t["losses"]))
@@ -383,11 +404,11 @@ class Profile(commands.Cog):
             return
 
         if active["profile_type"] == "pokemon":
-            desc = (
-                f"**{active['name']}** — это покемон. "
-                f"Кошелёк доступен только тренерам."
+            embed = discord.Embed(
+                title="💰 Баланс",
+                description=f"**{active['name']}** — это покемон. Кошелёк есть только у тренеров.",
+                color=EMBED_COLOR,
             )
-            embed = discord.Embed(title="💰 Баланс", description=desc, color=EMBED_COLOR)
             await interaction.response.send_message(embed=embed)
             return
 
