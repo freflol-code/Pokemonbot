@@ -43,6 +43,16 @@ def _mon_choices(
     return out
 
 
+def _pretty_ability(ability_en: str | None, abilities_ru: dict[str, str]) -> str:
+    """Русское название, если есть. Иначе — красиво оформленное английское."""
+    if not ability_en:
+        return "—"
+    ru = abilities_ru.get(ability_en)
+    if ru and ru != ability_en:
+        return ru
+    return str(ability_en).replace("-", " ").title()
+
+
 class PCView(discord.ui.View):
     """Пагинация ПК по 10 покемонов на страницу."""
 
@@ -69,8 +79,7 @@ class PCView(discord.ui.View):
         start = self.page * PC_PER_PAGE
         lines = []
         for i, m in enumerate(chunk, 1):
-            ability_en = m.get("ability")
-            ability = abilities_ru.get(ability_en) if ability_en else "—"
+            ability = _pretty_ability(m.get("ability"), abilities_ru)
             lines.append(
                 f"`{start + i}.` **{mon_title(m, species)}** • Ур. {m['level']} • "
                 f"Способность: {ability} • ID: `{m['instance_id']}`"
@@ -126,22 +135,37 @@ class Team(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
 
-    @app_commands.command(name="party", description="Показать активную команду")
-    async def party(self, interaction: discord.Interaction) -> None:
+    @app_commands.command(name="party", description="Показать команду тренера")
+    @app_commands.describe(user="Чью команду посмотреть (по умолчанию — свою)")
+    async def party(
+        self,
+        interaction: discord.Interaction,
+        user: discord.Member | None = None,
+    ) -> None:
         await interaction.response.defer()
-        t = await get_trainer(interaction.user.id)
+        target = user or interaction.user
+        t = await get_trainer(target.id)
         party = t["party"]
-        embed = discord.Embed(
-            title=f"🎒 Команда {interaction.user.display_name} ({len(party)}/{MAX_PARTY_SIZE})",
-            color=EMBED_COLOR,
-        )
+
+        if target.id == interaction.user.id:
+            title = f"🎒 Команда {target.display_name} ({len(party)}/{MAX_PARTY_SIZE})"
+        else:
+            title = (
+                f"🎒 Команда {target.display_name} "
+                f"({len(party)}/{MAX_PARTY_SIZE}) — чужая"
+            )
+
+        embed = discord.Embed(title=title, color=EMBED_COLOR)
         if not party:
-            embed.description = "Команда пуста. Добавьте покемона: /team_add"
+            embed.description = (
+                "Команда пуста. Добавьте покемона: /team_add"
+                if target.id == interaction.user.id
+                else f"У {target.display_name} команда пуста."
+            )
         species = await load_species(party)
         abilities_ru = await load_abilities_ru(party)
         for i, m in enumerate(party, 1):
-            ability_en = m.get("ability")
-            ability = abilities_ru.get(ability_en) if ability_en else "—"
+            ability = _pretty_ability(m.get("ability"), abilities_ru)
             embed.add_field(
                 name=f"{i}. {mon_title(m, species)}",
                 value=(
