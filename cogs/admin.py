@@ -14,17 +14,22 @@ from database import (
     add_item,
     add_item_by_profile,
     add_pokebucks,
+    add_pokebucks_by_profile,
     add_pokemon,
     add_pokemon_by_profile,
     add_to_pokedex,
     add_to_pokedex_by_profile,
     get_item_qty,
+    get_item_qty_by_profile,
     get_pokemon,
     get_pokemon_by_profile,
     get_profile,
+    get_profile_full,
     get_trainer,
     inc_losses,
+    inc_losses_by_profile,
     inc_wins,
+    inc_wins_by_profile,
     list_profiles,
     remove_pokemon,
     remove_pokemon_by_profile,
@@ -124,7 +129,7 @@ async def _profile_autocomplete(
         if p["profile_type"] == "pokemon":
             label = f"🐾 {p['name']} • Ур.{p.get('level') or '?'}"
         else:
-            label = f"🎓 {p['name']}"
+            label = f"🎓 {p['name']} • {p['pokebucks']:,} PB"
         if p["is_active"]:
             label = "🟢 " + label
         if not cur or cur in label.lower() or cur in p["profile_id"]:
@@ -141,31 +146,19 @@ async def _instance_autocomplete(
     user: Optional[discord.Member] = interaction.namespace.user
     if user is None:
         return []
-    profile_id = (interaction.namespace.profile_id or "").strip() if hasattr(interaction.namespace, "profile_id") else ""
+    profile_id = (
+        (interaction.namespace.profile_id or "").strip()
+        if hasattr(interaction.namespace, "profile_id")
+        else ""
+    )
 
     if profile_id:
         profile = await get_profile(profile_id)
         if not profile or profile["user_id"] != user.id:
             return []
-        t = {
-            "party": [],
-            "pc": [],
-        }
-        # Достаём покемонов конкретного профиля
-        from database import _pool_conn  # локальный импорт, чтобы не плодить публичные функции
-        pool = _pool_conn()
-        async with pool.acquire() as conn:
-            party_rows = await conn.fetch(
-                "SELECT * FROM pokemon WHERE profile_id = $1 AND in_party = 1 "
-                "ORDER BY slot ASC, instance_id ASC", profile_id,
-            )
-            pc_rows = await conn.fetch(
-                "SELECT * FROM pokemon WHERE profile_id = $1 AND in_party = 0 "
-                "ORDER BY instance_id ASC", profile_id,
-            )
-        from database import _pokemon_dict
-        t["party"] = [_pokemon_dict(r) for r in party_rows]
-        t["pc"] = [_pokemon_dict(r) for r in pc_rows]
+        t = await get_profile_full(profile_id)
+        if not t:
+            return []
     else:
         t = await get_trainer(user.id)
 
@@ -241,8 +234,8 @@ class Admin(commands.Cog):
         level="Уровень (1–100, по умолчанию 5)",
         gender="Пол. Не укажете — определится случайно по виду.",
         nickname="Кличка (необязательно)",
-        moves="Атаки через запятую, 1–4 (не укажете — 4 случайные)",
-        ability="Способность. Не укажете — выберется случайная обычная.",
+        moves="Атаки через запятую, 1–4",
+        ability="Способность. Не укажете — выберется случайная.",
         profile_id="Конкретный персонаж (если нужно выдать не активному)",
     )
     @app_commands.choices(gender=GENDER_CHOICES)
@@ -301,7 +294,6 @@ class Admin(commands.Cog):
             await interaction.followup.send("❌ Кличка не длиннее 20 символов.", ephemeral=True)
             return
 
-        # Определяем целевой профиль
         if profile_id:
             target_profile = await get_profile(profile_id.strip())
             if not target_profile or target_profile["user_id"] != user.id:
@@ -309,13 +301,14 @@ class Admin(commands.Cog):
                     "❌ Профиль с таким ID не найден у указанного игрока.", ephemeral=True
                 )
                 return
+            target_profile_full = await get_profile_full(target_profile["profile_id"])
             profile_name = f"{target_profile['name']} (`{target_profile['profile_id']}`)"
             profile_type = target_profile["profile_type"]
         else:
-            trainer = await get_trainer(user.id)
-            target_profile = trainer
-            profile_name = f"{trainer['name']} (активный)"
-            profile_type = trainer["profile_type"]
+            target_profile_full = await get_trainer(user.id)
+            target_profile = target_profile_full
+            profile_name = f"{target_profile['name']} (активный)"
+            profile_type = target_profile["profile_type"]
 
         if profile_type == "pokemon":
             await interaction.followup.send(
@@ -324,7 +317,7 @@ class Admin(commands.Cog):
             )
             return
 
-        party_len = len(target_profile.get("party", []))
+        party_len = len(target_profile_full.get("party", []))
         to_party = party_len < MAX_PARTY_SIZE
 
         mon = {
@@ -380,6 +373,220 @@ class Admin(commands.Cog):
             )
         except discord.Forbidden:
             pass
+
+    # ------------------------------------------------------------------ /give_money
+
+    @app_commands.command(
+        name="give_money",
+        description="[Мастер] Выдать или забрать Pokébucks у активного или указанного персонажа",
+    )
+    @app_commands.describe(
+        user="Кому",
+        amount="Сумма (+ выдать, − забрать)",
+        profile_id="Конкретный персонаж (если не активный)",
+    )
+    @is_master()
+    @app_commands.autocomplete(profile_id=_profile_autocomplete)
+    async def give_money(
+        self,
+        interaction: discord.Interaction,
+        user: discord.Member,
+        amount: int,
+        profile_id: Optional[str] = None,
+    ) -> None:
+        if profile_id:
+            profile = await get_profile(profile_id.strip())
+            if not profile or profile["user_id"] != user.id:
+                await interaction.response.send_message(
+                    "❌ Профиль не найден у игрока.", ephemeral=True
+                )
+                return
+            if profile["profile_type"] == "pokemon":
+                await interaction.response.send_message(
+                    f"❌ **{profile['name']}** — покемон. У покемонов нет кошелька.",
+                    ephemeral=True,
+                )
+                return
+            new_balance = await add_pokebucks_by_profile(profile["profile_id"], int(amount))
+            profile_name = profile["name"]
+        else:
+            new_balance = await add_pokebucks(user.id, int(amount))
+            active = await get_profile_full((await get_trainer(user.id))["profile_id"])
+            profile_name = active["name"] if active else "—"
+
+        sign = "+" if amount >= 0 else ""
+        embed = discord.Embed(
+            title="💰 Pokébucks обновлены",
+            description=(
+                f"**Игрок:** {user.mention}\n"
+                f"**Персонаж:** {profile_name}\n"
+                f"**Изменение:** {sign}{amount:,} PB\n"
+                f"**Текущий баланс:** {new_balance:,} PB"
+            ),
+            color=discord.Color.gold() if amount >= 0 else discord.Color.dark_red(),
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    # ------------------------------------------------------------------ /give_item
+
+    @app_commands.command(
+        name="give_item",
+        description="[Мастер] Выдать предмет игроку (в активный или указанный персонаж)",
+    )
+    @app_commands.describe(
+        user="Кому выдать",
+        item="Ключ предмета (начните печатать — подскажу)",
+        quantity="Сколько (1–999)",
+        profile_id="Конкретный персонаж (если не активный)",
+    )
+    @is_master()
+    @app_commands.autocomplete(item=_item_autocomplete, profile_id=_profile_autocomplete)
+    async def give_item(
+        self,
+        interaction: discord.Interaction,
+        user: discord.Member,
+        item: str,
+        quantity: app_commands.Range[int, 1, 999] = 1,
+        profile_id: Optional[str] = None,
+    ) -> None:
+        from cogs.inventory import ITEMS
+
+        key = item.strip().lower().replace(" ", "_")
+        if key not in ITEMS:
+            await interaction.response.send_message(
+                f"❌ Предмет `{key}` не найден в каталоге.",
+                ephemeral=True,
+            )
+            return
+
+        if profile_id:
+            profile = await get_profile(profile_id.strip())
+            if not profile or profile["user_id"] != user.id:
+                await interaction.response.send_message(
+                    "❌ Профиль не найден у игрока.", ephemeral=True
+                )
+                return
+            if profile["profile_type"] == "pokemon":
+                await interaction.response.send_message(
+                    f"❌ **{profile['name']}** — покемон. У покемонов нет инвентаря.",
+                    ephemeral=True,
+                )
+                return
+            await add_item_by_profile(profile["profile_id"], key, int(quantity))
+            qty_now = await get_item_qty_by_profile(profile["profile_id"], key)
+            profile_name = profile["name"]
+        else:
+            await add_item(user.id, key, int(quantity))
+            qty_now = await get_item_qty(user.id, key)
+            active = await get_trainer(user.id)
+            profile_name = active["name"]
+
+        name = ITEMS[key]["name"]
+        embed = discord.Embed(
+            title="📦 Предмет выдан",
+            description=(
+                f"**Игрок:** {user.mention}\n"
+                f"**Персонаж:** {profile_name}\n"
+                f"**Предмет:** {name} × {quantity}\n"
+                f"**Теперь в инвентаре:** {qty_now} шт."
+            ),
+            color=discord.Color.green(),
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    # ------------------------------------------------------------------ /gm_win
+
+    @app_commands.command(
+        name="gm_win",
+        description="[Мастер] Начислить победы активному или указанному персонажу",
+    )
+    @app_commands.describe(
+        user="Кому",
+        amount="Сколько побед (по умолчанию 1)",
+        profile_id="Конкретный персонаж (если не активный)",
+    )
+    @is_master()
+    @app_commands.autocomplete(profile_id=_profile_autocomplete)
+    async def gm_win(
+        self,
+        interaction: discord.Interaction,
+        user: discord.Member,
+        amount: app_commands.Range[int, 1, 100] = 1,
+        profile_id: Optional[str] = None,
+    ) -> None:
+        if profile_id:
+            profile = await get_profile(profile_id.strip())
+            if not profile or profile["user_id"] != user.id:
+                await interaction.response.send_message(
+                    "❌ Профиль не найден у игрока.", ephemeral=True
+                )
+                return
+            await inc_wins_by_profile(profile["profile_id"], int(amount))
+            full = await get_profile_full(profile["profile_id"])
+            profile_name = profile["name"]
+        else:
+            await inc_wins(user.id, int(amount))
+            full = await get_trainer(user.id)
+            profile_name = full["name"]
+
+        embed = discord.Embed(
+            title="🏆 Победы засчитаны",
+            description=(
+                f"**Игрок:** {user.mention}\n"
+                f"**Персонаж:** {profile_name}\n"
+                f"**Начислено:** +{amount}\n"
+                f"**Побед:** {full['wins']} • **Поражений:** {full['losses']}"
+            ),
+            color=discord.Color.green(),
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    # ------------------------------------------------------------------ /gm_lose
+
+    @app_commands.command(
+        name="gm_lose",
+        description="[Мастер] Начислить поражения активному или указанному персонажу",
+    )
+    @app_commands.describe(
+        user="Кому",
+        amount="Сколько поражений (по умолчанию 1)",
+        profile_id="Конкретный персонаж (если не активный)",
+    )
+    @is_master()
+    @app_commands.autocomplete(profile_id=_profile_autocomplete)
+    async def gm_lose(
+        self,
+        interaction: discord.Interaction,
+        user: discord.Member,
+        amount: app_commands.Range[int, 1, 100] = 1,
+        profile_id: Optional[str] = None,
+    ) -> None:
+        if profile_id:
+            profile = await get_profile(profile_id.strip())
+            if not profile or profile["user_id"] != user.id:
+                await interaction.response.send_message(
+                    "❌ Профиль не найден у игрока.", ephemeral=True
+                )
+                return
+            await inc_losses_by_profile(profile["profile_id"], int(amount))
+            full = await get_profile_full(profile["profile_id"])
+            profile_name = profile["name"]
+        else:
+            await inc_losses(user.id, int(amount))
+            full = await get_trainer(user.id)
+            profile_name = full["name"]
+
+        embed = discord.Embed(
+            title="💔 Поражения засчитаны",
+            description=(
+                f"**Игрок:** {user.mention}\n"
+                f"**Персонаж:** {profile_name}\n"
+                f"**Начислено:** +{amount}\n"
+                f"**Побед:** {full['wins']} • **Поражений:** {full['losses']}"
+            ),
+            color=discord.Color.dark_red(),
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     # ------------------------------------------------------------------ /gm_delete
 
@@ -621,122 +828,6 @@ class Admin(commands.Cog):
         await interaction.response.send_message(
             f"✅ Пол покемона `{iid}` → **{gender.name}**.", ephemeral=True
         )
-
-    # ------------------------------------------------------------------ /give_money
-
-    @app_commands.command(
-        name="give_money",
-        description="[Мастер] Выдать или забрать Pokébucks у игрока (в активный профиль)",
-    )
-    @app_commands.describe(user="Кому", amount="Сумма (+ выдать, − забрать)")
-    @is_master()
-    async def give_money(
-        self, interaction: discord.Interaction,
-        user: discord.Member, amount: int,
-    ) -> None:
-        new_balance = await add_pokebucks(user.id, int(amount))
-        sign = "+" if amount >= 0 else ""
-        embed = discord.Embed(
-            title="💰 Pokébucks обновлены",
-            description=(
-                f"**Игрок:** {user.mention}\n"
-                f"**Изменение:** {sign}{amount:,} PB\n"
-                f"**Текущий баланс:** {new_balance:,} PB"
-            ),
-            color=discord.Color.gold() if amount >= 0 else discord.Color.dark_red(),
-        )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    # ------------------------------------------------------------------ /give_item
-
-    @app_commands.command(
-        name="give_item",
-        description="[Мастер] Выдать игроку предмет из каталога (в активный профиль)",
-    )
-    @app_commands.describe(
-        user="Кому выдать",
-        item="Ключ предмета (начните печатать — подскажу)",
-        quantity="Сколько (1–999)",
-    )
-    @is_master()
-    @app_commands.autocomplete(item=_item_autocomplete)
-    async def give_item(
-        self,
-        interaction: discord.Interaction,
-        user: discord.Member,
-        item: str,
-        quantity: app_commands.Range[int, 1, 999] = 1,
-    ) -> None:
-        from cogs.inventory import ITEMS
-
-        key = item.strip().lower().replace(" ", "_")
-        if key not in ITEMS:
-            await interaction.response.send_message(
-                f"❌ Предмет `{key}` не найден в каталоге.",
-                ephemeral=True,
-            )
-            return
-
-        await add_item(user.id, key, int(quantity))
-        name = ITEMS[key]["name"]
-        qty_now = await get_item_qty(user.id, key)
-
-        embed = discord.Embed(
-            title="📦 Предмет выдан",
-            description=(
-                f"**Игрок:** {user.mention}\n"
-                f"**Предмет:** {name} × {quantity}\n"
-                f"**Теперь в инвентаре:** {qty_now} шт."
-            ),
-            color=discord.Color.green(),
-        )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    # ------------------------------------------------------------------ /gm_win, /gm_lose
-
-    @app_commands.command(name="gm_win", description="[Мастер] Начислить победы активному профилю")
-    @app_commands.describe(user="Кому", amount="Сколько побед (по умолчанию 1)")
-    @is_master()
-    async def gm_win(
-        self, interaction: discord.Interaction,
-        user: discord.Member,
-        amount: app_commands.Range[int, 1, 100] = 1,
-    ) -> None:
-        await inc_wins(user.id, int(amount))
-        t = await get_trainer(user.id)
-        embed = discord.Embed(
-            title="🏆 Победы засчитаны",
-            description=(
-                f"**Игрок:** {user.mention}\n"
-                f"**Персонаж:** {t['name']}\n"
-                f"**Начислено:** +{amount}\n"
-                f"**Побед:** {t['wins']} • **Поражений:** {t['losses']}"
-            ),
-            color=discord.Color.green(),
-        )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    @app_commands.command(name="gm_lose", description="[Мастер] Начислить поражения активному профилю")
-    @app_commands.describe(user="Кому", amount="Сколько поражений (по умолчанию 1)")
-    @is_master()
-    async def gm_lose(
-        self, interaction: discord.Interaction,
-        user: discord.Member,
-        amount: app_commands.Range[int, 1, 100] = 1,
-    ) -> None:
-        await inc_losses(user.id, int(amount))
-        t = await get_trainer(user.id)
-        embed = discord.Embed(
-            title="💔 Поражения засчитаны",
-            description=(
-                f"**Игрок:** {user.mention}\n"
-                f"**Персонаж:** {t['name']}\n"
-                f"**Начислено:** +{amount}\n"
-                f"**Побед:** {t['wins']} • **Поражений:** {t['losses']}"
-            ),
-            color=discord.Color.dark_red(),
-        )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 async def setup(bot: commands.Bot) -> None:
