@@ -80,7 +80,7 @@ class Dice(commands.Cog):
         embed = discord.Embed(title="⚔️ Атака", description="\n".join(lines), color=color)
         await interaction.response.send_message(embed=embed)
 
-    @app_commands.command(name="dodge", description="Попытка уклониться — 50/50")
+    @app_commands.command(name="dodge", description="Попытка уклониться")
     @app_commands.describe(
         ch="Модификатор уклонения (-6..+6). По умолчанию 0",
     )
@@ -89,7 +89,7 @@ class Dice(commands.Cog):
         interaction: discord.Interaction,
         ch: app_commands.Range[int, -6, 6] = 0,
     ) -> None:
-        base = 0.5
+        base = 0.25
         mult = battle_math.stage_multiplier(ch)
         chance = min(0.95, max(0.05, base * mult))
 
