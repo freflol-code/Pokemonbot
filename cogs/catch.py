@@ -41,13 +41,10 @@ log = logging.getLogger(__name__)
 #  ШАНСЫ ПОИМКИ ПО ПОКЕБОЛАМ
 # ==========================================================================
 BALL_BASE_CHANCE: dict[str, float] = {
-    # --- Базовые ---
     "pokeball": 25.0,
     "greatball": 50.0,
     "ultraball": 70.0,
     "masterball": 100.0,
-
-    # --- Контекстные (Hoenn/Sinnoh) ---
     "net_ball": 25.0,
     "dive_ball": 25.0,
     "nest_ball": 25.0,
@@ -57,8 +54,6 @@ BALL_BASE_CHANCE: dict[str, float] = {
     "luxury_ball": 25.0,
     "quick_ball": 25.0,
     "dusk_ball": 25.0,
-
-    # --- Событийные / без условий ---
     "premier_ball": 25.0,
     "cherish_ball": 100.0,
     "park_ball": 100.0,
@@ -67,8 +62,6 @@ BALL_BASE_CHANCE: dict[str, float] = {
     "gs_ball": 100.0,
     "strange_ball": 25.0,
     "dream_ball": 25.0,
-
-    # --- Апокорновые (Johto) ---
     "level_ball": 25.0,
     "lure_ball": 25.0,
     "moon_ball": 25.0,
@@ -76,15 +69,11 @@ BALL_BASE_CHANCE: dict[str, float] = {
     "love_ball": 25.0,
     "heavy_ball": 25.0,
     "fast_ball": 25.0,
-
-    # --- Legends: Arceus ---
     "feather_ball": 25.0,
     "wing_ball": 25.0,
     "jet_ball": 25.0,
     "leaden_ball": 25.0,
     "gigaton_ball": 25.0,
-
-    # --- Ultra Beast ---
     "beast_ball": 25.0,
 }
 
@@ -125,15 +114,16 @@ BALL_NAMES: dict[str, str] = {
     "gigaton_ball": "Гигатон-болл",
 }
 
+# Discord разрешает максимум 25 вариантов в choices.
+# Остальные 8 покеболов (origin, gs, strange, feather, wing, jet, leaden, gigaton)
+# остаются в ITEMS — мастер может выдать через /give_item.
 CATCHABLE_BALLS = [
     "pokeball", "greatball", "ultraball",
     "net_ball", "dive_ball", "nest_ball", "repeat_ball",
     "timer_ball", "heal_ball", "luxury_ball", "quick_ball", "dusk_ball",
     "premier_ball", "sport_ball", "level_ball", "lure_ball",
     "moon_ball", "friend_ball", "love_ball", "heavy_ball", "fast_ball",
-    "dream_ball", "beast_ball", "feather_ball", "wing_ball",
-    "jet_ball", "leaden_ball", "gigaton_ball",
-    "cherish_ball", "park_ball", "origin_ball", "gs_ball", "strange_ball",
+    "dream_ball", "beast_ball", "cherish_ball", "park_ball",
 ]
 
 BALL_CHOICES = [
