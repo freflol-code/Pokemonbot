@@ -59,11 +59,10 @@ def _ptype_label(ptype: str) -> str:
 
 def _status_label(status: str | None, pokeball: str | None) -> str:
     status = status or "wild"
-    base = STATUS_LABEL.get(status, status)
-    if status == "caught" and pokeball:
-        ball_name = POKEBALL_LABEL.get(pokeball, pokeball)
-        return f"{base} ({ball_name})"
-    return base
+    if status == "caught":
+        ball_name = POKEBALL_LABEL.get(pokeball, pokeball) if pokeball else "не указан"
+        return f"🔴 Пойман • Покебол: {ball_name}"
+    return "🌿 Дикий • Покебол: Нет"
 
 
 def _gender_label(gender: str | None) -> str:
@@ -87,9 +86,9 @@ class Profile(commands.Cog):
         profile_type="Тип: тренер или покемон",
         avatar="Картинка-аватар (прикрепите файл)",
         level="Уровень (только для покемонов)",
+        gender="Пол (только для покемонов)",
         ability="Способность (только для покемонов), например blaze",
         moves="Атаки через запятую (только для покемонов), до 4",
-        gender="Пол (только для покемонов)",
         status="Статус покемона: wild (дикий) или caught (пойман)",
         pokeball="В каком покеболе сидит (только если caught)",
     )
@@ -112,9 +111,9 @@ class Profile(commands.Cog):
         profile_type: app_commands.Choice[str],
         avatar: discord.Attachment | None = None,
         level: app_commands.Range[int, 1, 100] | None = None,
+        gender: app_commands.Choice[str] | None = None,
         ability: str | None = None,
         moves: str | None = None,
-        gender: app_commands.Choice[str] | None = None,
         status: app_commands.Choice[str] | None = None,
         pokeball: str | None = None,
     ) -> None:
@@ -148,7 +147,9 @@ class Profile(commands.Cog):
 
         if profile_type.value == "pokemon":
             mon_level = int(level) if level else 5
+            mon_gender = gender.value if gender else "genderless"
             mon_ability = (ability or "").strip().lower().replace(" ", "-") or None
+
             if moves:
                 parsed = [
                     m.strip().lower().replace(" ", "-")
@@ -161,10 +162,11 @@ class Profile(commands.Cog):
                     )
                     return
                 mon_moves = parsed
-            mon_gender = gender.value if gender else "genderless"
+
             mon_status = status.value if status else "wild"
             if mon_status == "caught":
                 mon_ball = (pokeball or "pokeball").strip().lower().replace(" ", "_")
+            # Если дикий — покебол остаётся None
 
         profile = await create_profile(
             user_id=interaction.user.id,
@@ -235,6 +237,7 @@ class Profile(commands.Cog):
                 detail = (
                     f"🐾 Покемон • Ур. {p.get('level') or '—'} • "
                     f"{_gender_label(p.get('gender'))} • "
+                    f"🏆 {p['wins']} / 💔 {p['losses']}\n"
                     f"{_status_label(p.get('status'), p.get('pokeball'))}"
                 )
             else:
@@ -348,7 +351,6 @@ class Profile(commands.Cog):
             embed.set_thumbnail(url=active["avatar_url"])
 
         if active["profile_type"] == "pokemon":
-            # Русское название способности
             ability_ru = active.get("ability") or "—"
             if active.get("ability"):
                 try:
@@ -359,14 +361,15 @@ class Profile(commands.Cog):
             embed.add_field(name="🎚️ Уровень", value=str(active.get("level") or "—"))
             embed.add_field(name="🎭 Пол", value=_gender_label(active.get("gender")))
             embed.add_field(name="✨ Способность", value=ability_ru)
-            embed.add_field(
-                name="⚔️ Атаки",
-                value=format_moves(active.get("moves") or []),
-                inline=False,
-            )
+            embed.add_field(name="🏆 Победы", value=str(active["wins"]))
+            embed.add_field(name="💔 Поражения", value=str(active["losses"]))
             embed.add_field(
                 name="🔴 Статус",
                 value=_status_label(active.get("status"), active.get("pokeball")),
+            )
+            embed.add_field(
+                name="⚔️ Атаки",
+                value=format_moves(active.get("moves") or []),
                 inline=False,
             )
         else:
