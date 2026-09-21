@@ -114,16 +114,16 @@ BALL_NAMES: dict[str, str] = {
     "gigaton_ball": "Гигатон-болл",
 }
 
-# Discord разрешает максимум 25 вариантов в choices.
-# Остальные 8 покеболов (origin, gs, strange, feather, wing, jet, leaden, gigaton)
-# остаются в ITEMS — мастер может выдать через /give_item.
+# Discord разрешает максимум 25 вариантов в choices. Сделал ровно 20.
+# Остальные покеболы (fast, dream, beast, cherish, park, origin, gs,
+# strange, feather, wing, jet, leaden, gigaton) — можно выдать только
+# через /give_item от мастера.
 CATCHABLE_BALLS = [
     "pokeball", "greatball", "ultraball",
     "net_ball", "dive_ball", "nest_ball", "repeat_ball",
     "timer_ball", "heal_ball", "luxury_ball", "quick_ball", "dusk_ball",
     "premier_ball", "sport_ball", "level_ball", "lure_ball",
-    "moon_ball", "friend_ball", "love_ball", "heavy_ball", "fast_ball",
-    "dream_ball", "beast_ball", "cherish_ball", "park_ball",
+    "moon_ball", "friend_ball", "love_ball", "heavy_ball",
 ]
 
 BALL_CHOICES = [
