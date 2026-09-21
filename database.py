@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS profiles (
     ability      TEXT,
     status       TEXT DEFAULT 'wild',
     pokeball     TEXT,
+    gender       TEXT,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_profiles_user ON profiles(user_id);
@@ -77,6 +78,7 @@ ALTER TABLE profiles ADD COLUMN IF NOT EXISTS moves TEXT;
 ALTER TABLE profiles ADD COLUMN IF NOT EXISTS ability TEXT;
 ALTER TABLE profiles ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'wild';
 ALTER TABLE profiles ADD COLUMN IF NOT EXISTS pokeball TEXT;
+ALTER TABLE profiles ADD COLUMN IF NOT EXISTS gender TEXT;
 """
 
 
@@ -122,10 +124,6 @@ def _pool_conn() -> asyncpg.Pool:
     return _pool
 
 
-# --------------------------------------------------------------------------- #
-#                        ПРОФИЛИ (персонажи игрока)                            #
-# --------------------------------------------------------------------------- #
-
 def _profile_dict(row: asyncpg.Record) -> dict[str, Any]:
     try:
         moves = json.loads(row["moves"]) if row["moves"] else []
@@ -147,6 +145,7 @@ def _profile_dict(row: asyncpg.Record) -> dict[str, Any]:
         "ability": row["ability"],
         "status": row["status"] or "wild",
         "pokeball": row["pokeball"],
+        "gender": row["gender"],
     }
 
 
@@ -161,6 +160,7 @@ async def create_profile(
     ability: Optional[str] = None,
     status: Optional[str] = None,
     pokeball: Optional[str] = None,
+    gender: Optional[str] = None,
 ) -> dict[str, Any]:
     if profile_type not in PROFILE_TYPES:
         profile_type = "trainer"
@@ -177,10 +177,10 @@ async def create_profile(
         await conn.execute(
             "INSERT INTO profiles "
             "(profile_id, user_id, name, profile_type, avatar_url, is_active, "
-            " level, moves, ability, status, pokeball) "
-            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+            " level, moves, ability, status, pokeball, gender) "
+            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
             pid, user_id, name, profile_type, avatar_url, make_active,
-            level, moves_json, ability, status, pokeball,
+            level, moves_json, ability, status, pokeball, gender,
         )
         row = await conn.fetchrow(
             "SELECT * FROM profiles WHERE profile_id = $1", pid,
@@ -266,10 +266,6 @@ async def _ensure_profile(user_id: int) -> dict[str, Any]:
     return await create_profile(user_id, name="Тренер", profile_type="trainer")
 
 
-# --------------------------------------------------------------------------- #
-#                    СОВМЕСТИМОСТЬ СО СТАРЫМИ КОГАМИ                           #
-# --------------------------------------------------------------------------- #
-
 def _pokemon_dict(row: asyncpg.Record) -> dict[str, Any]:
     try:
         moves = json.loads(row["moves"]) if row["moves"] else []
@@ -319,10 +315,6 @@ async def _pid_of(user_id: int) -> str:
     profile = await _ensure_profile(user_id)
     return profile["profile_id"]
 
-
-# --------------------------------------------------------------------------- #
-#                        ДЕНЬГИ / ЛОКАЦИЯ / СТАТЫ                              #
-# --------------------------------------------------------------------------- #
 
 async def set_location(user_id: int, location: str) -> None:
     pid = await _pid_of(user_id)
@@ -376,10 +368,6 @@ async def inc_losses(user_id: int, amount: int = 1) -> None:
             "UPDATE profiles SET losses = losses + $1 WHERE profile_id = $2", amount, pid,
         )
 
-
-# --------------------------------------------------------------------------- #
-#                                  ПОКЕМОНЫ                                    #
-# --------------------------------------------------------------------------- #
 
 async def add_pokemon(user_id: int, mon: dict[str, Any], to_party: bool = False) -> bool:
     pid = await _pid_of(user_id)
@@ -503,10 +491,6 @@ async def get_pokemon(user_id: int, instance_id: str) -> Optional[dict[str, Any]
     return _pokemon_dict(row) if row else None
 
 
-# --------------------------------------------------------------------------- #
-#                                  ИНВЕНТАРЬ                                   #
-# --------------------------------------------------------------------------- #
-
 async def add_item(user_id: int, item_key: str, qty: int) -> None:
     pid = await _pid_of(user_id)
     pool = _pool_conn()
@@ -542,10 +526,6 @@ async def take_item(user_id: int, item_key: str, qty: int = 1) -> bool:
     return result.endswith("1")
 
 
-# --------------------------------------------------------------------------- #
-#                                  ПОКЕДЕКС                                    #
-# --------------------------------------------------------------------------- #
-
 async def add_to_pokedex(user_id: int, species_id: int) -> bool:
     pid = await _pid_of(user_id)
     pool = _pool_conn()
@@ -557,10 +537,6 @@ async def add_to_pokedex(user_id: int, species_id: int) -> bool:
         )
     return result.endswith("1")
 
-
-# --------------------------------------------------------------------------- #
-#                                    СБРОС                                     #
-# --------------------------------------------------------------------------- #
 
 async def reset_trainer(user_id: int) -> None:
     pid = await _pid_of(user_id)
