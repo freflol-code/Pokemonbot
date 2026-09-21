@@ -1,6 +1,4 @@
-"""Броски для РП-боёв: атака и уклонение."""
-from __future__ import annotations
-
+"""Броски для РП-боёв: атака, уклонение, крит."""
 import random
 
 import discord
@@ -8,6 +6,25 @@ from discord import app_commands
 from discord.ext import commands
 
 import battle_math
+
+
+# Шанс крита в зависимости от стадии (cr).
+# 0 → 6% (база), +1 → 12%, +2 → 50%, +3 и выше → 100%
+CRIT_CHANCES = {
+    0: 6.25,
+    1: 12.5,
+    2: 50.0,
+    3: 100.0,
+    4: 100.0,
+    5: 100.0,
+    6: 100.0,
+}
+
+
+def _roll_crit(cr_stage: int) -> bool:
+    cr_stage = max(0, min(6, int(cr_stage)))
+    chance = CRIT_CHANCES.get(cr_stage, 6.25)
+    return random.random() * 100 < chance
 
 
 class Dice(commands.Cog):
@@ -20,12 +37,14 @@ class Dice(commands.Cog):
     @app_commands.describe(
         accuracy="Точность атаки в % (1–100). 0 — не промахивается",
         ch="Модификатор точности/уклонения (-6..+6). По умолчанию 0",
+        cr="Стадия крита (0..+6). 0 — база 6%, +2 — 50%, +3 — 100%",
     )
     async def attack(
         self,
         interaction: discord.Interaction,
         accuracy: app_commands.Range[int, 0, 100],
         ch: app_commands.Range[int, -6, 6] = 0,
+        cr: app_commands.Range[int, 0, 6] = 0,
     ) -> None:
         move_accuracy = None if accuracy == 0 else accuracy
 
@@ -38,27 +57,22 @@ class Dice(commands.Cog):
         roll = random.randint(1, 100)
         hit = roll <= round(chance * 100)
 
+        # Крит считается только если атака попала
+        crit = hit and _roll_crit(cr)
+
         lines = [f"**{interaction.user.display_name}** атакует…", ""]
 
-        if move_accuracy is None:
-            lines.append("Атака не промахивается.")
-            lines.append("")
-            lines.append("✅ **ПОПАЛ!**")
-            color = discord.Color.green()
+        if not hit:
+            lines.append("💨 **ПРОМАХ!**")
+            color = discord.Color.dark_red()
         else:
-            lines.append(f"Точность: **{accuracy}%**")
-            if ch != 0:
-                sign = "+" if ch > 0 else ""
-                lines.append(f"Ch: **{sign}{ch}**")
-                lines.append(f"Итоговый шанс: **{chance * 100:.1f}%**")
-            lines.append(f"🎲 Выпало: **{roll}**")
-            lines.append("")
-            if hit:
-                lines.append("✅ **ПОПАЛ!**")
-                color = discord.Color.green()
+            lines.append("✅ **ПОПАЛ!**")
+            if crit:
+                lines.append("")
+                lines.append("🌟 **КРИТИЧЕСКИЙ УДАР!**")
+                color = discord.Color.gold()
             else:
-                lines.append("💨 **ПРОМАХ!**")
-                color = discord.Color.dark_red()
+                color = discord.Color.green()
 
         embed = discord.Embed(title="⚔️ Атака", description="\n".join(lines), color=color)
         await interaction.response.send_message(embed=embed)
@@ -80,12 +94,6 @@ class Dice(commands.Cog):
         success = roll <= round(chance * 100)
 
         lines = [f"**{interaction.user.display_name}** уклоняется…", ""]
-        if ch != 0:
-            sign = "+" if ch > 0 else ""
-            lines.append(f"Ch: **{sign}{ch}**")
-        lines.append(f"Шанс: **{chance * 100:.0f}%**")
-        lines.append(f"🎲 Выпало: **{roll}**")
-        lines.append("")
 
         if success:
             lines.append("✅ **УКЛОНИЛСЯ!**")
