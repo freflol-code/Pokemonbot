@@ -56,6 +56,33 @@ ITEMS: dict[str, dict[str, object]] = {
     "quick_ball":     {"name": "Квикбол",                    "price": 400},
     "dusk_ball":      {"name": "Дускбол",                    "price": 180},
 
+    # ---- Новые покеболы (событийные / редкие) ----
+    "premier_ball":   {"name": "Премьер-болл",               "price": 100},
+    "cherish_ball":   {"name": "Чериш-болл",                 "price": 0},
+    "park_ball":      {"name": "Парк-болл",                  "price": 0},
+    "sport_ball":     {"name": "Спорт-болл",                 "price": 300},
+    "origin_ball":    {"name": "Ориджин-болл",               "price": 0},
+    "gs_ball":        {"name": "GS-болл",                    "price": 0},
+    "strange_ball":   {"name": "Стрэндж-болл",               "price": 0},
+    "dream_ball":     {"name": "Дрим-болл",                  "price": 500},
+    "beast_ball":     {"name": "Бист-болл",                  "price": 5000},
+
+    # ---- Апокорновые (Johto) ----
+    "level_ball":     {"name": "Левел-болл",                 "price": 250},
+    "lure_ball":      {"name": "Люр-болл",                   "price": 250},
+    "moon_ball":      {"name": "Мун-болл",                   "price": 250},
+    "friend_ball":    {"name": "Френд-болл",                 "price": 200},
+    "love_ball":      {"name": "Лав-болл",                   "price": 200},
+    "heavy_ball":     {"name": "Хэви-болл",                  "price": 300},
+    "fast_ball":      {"name": "Фаст-болл",                  "price": 250},
+
+    # ---- Legends: Arceus ----
+    "feather_ball":   {"name": "Фезер-болл",                 "price": 150},
+    "wing_ball":      {"name": "Винг-болл",                  "price": 180},
+    "jet_ball":       {"name": "Джет-болл",                  "price": 200},
+    "leaden_ball":    {"name": "Леден-болл",                 "price": 250},
+    "gigaton_ball":   {"name": "Гигатон-болл",               "price": 500},
+
     # ---- Исследовательские (прокачка) ----
     "protein":        {"name": "Протеин",                    "price": 5000},
     "iron":           {"name": "Железо",                     "price": 5000},
@@ -204,7 +231,6 @@ ITEMS: dict[str, dict[str, object]] = {
 
 # ==========================================================================
 #  ЛОКАЦИИ
-#  Ключ в UPPERCASE = переменная окружения SHOP_CHANNEL_<KEY>.
 # ==========================================================================
 LOCATION_NAMES: dict[str, str] = {
     "hoshinori": "✨ Хошинори",
@@ -230,6 +256,22 @@ DEFAULT_STOCK: list[str] = [
     "potion", "super_potion", "revive",
 ]
 
+# Полный ассортимент — с новыми покеболами
+FULL_BALLS: list[str] = [
+    "pokeball", "greatball", "ultraball",
+    "net_ball", "dive_ball", "nest_ball", "repeat_ball",
+    "timer_ball", "heal_ball", "luxury_ball", "quick_ball", "dusk_ball",
+    "premier_ball", "sport_ball", "level_ball", "lure_ball",
+    "moon_ball", "friend_ball", "love_ball", "heavy_ball", "fast_ball",
+    "dream_ball", "beast_ball",
+    "feather_ball", "wing_ball", "jet_ball", "leaden_ball", "gigaton_ball",
+]
+
+# Расширенный набор — с событийными (только для Эйдолона)
+LEGENDARY_BALLS: list[str] = FULL_BALLS + [
+    "cherish_ball", "park_ball", "origin_ball", "gs_ball", "strange_ball",
+]
+
 ASTERIS_STOCK: list[str] = [
     # Расходники
     "pokeball", "greatball", "ultraball",
@@ -253,6 +295,8 @@ ASTERIS_STOCK: list[str] = [
     "z_crystal_dragon", "z_crystal_ghost", "z_crystal_psychic",
     # Динамакс
     "dynamax_band",
+    # Полный набор покеболов
+    *FULL_BALLS,
 ]
 
 STOCK_BY_LOCATION: dict[str, list[str]] = {
@@ -265,6 +309,8 @@ STOCK_BY_LOCATION: dict[str, list[str]] = {
         "white_herb", "mental_herb", "power_herb",
         "net_ball", "dive_ball", "nest_ball", "repeat_ball",
         "timer_ball", "heal_ball", "luxury_ball", "quick_ball",
+        # Апокорновые для «Луга»
+        "friend_ball", "love_ball", "moon_ball",
         "protein", "iron", "calcium", "zinc", "carbos", "hp_up", "rare_candy",
     ],
 
@@ -289,8 +335,6 @@ STOCK_BY_LOCATION: dict[str, list[str]] = {
         "fresh_water", "soda_pop", "lemonade", "moomoo_milk", "full_restore",
         "energy_powder", "energy_root", "heal_powder", "revival_herb",
         "white_herb", "mental_herb", "power_herb",
-        "net_ball", "dive_ball", "nest_ball", "repeat_ball",
-        "timer_ball", "heal_ball", "luxury_ball", "quick_ball",
         "protein", "iron", "calcium", "zinc", "carbos", "hp_up", "rare_candy",
         "fire_stone", "water_stone", "thunder_stone", "leaf_stone",
         "moon_stone", "sun_stone", "shiny_stone", "dusk_stone",
@@ -314,6 +358,8 @@ STOCK_BY_LOCATION: dict[str, list[str]] = {
         "choice_band", "choice_specs", "choice_scarf",
         "life_orb", "focus_sash", "leftovers",
         "assault_vest", "expert_belt", "rocky_helmet",
+        # Полный набор покеболов
+        *FULL_BALLS,
     ],
 
     "hibiki": [
@@ -325,6 +371,8 @@ STOCK_BY_LOCATION: dict[str, list[str]] = {
         "white_herb", "mental_herb", "power_herb",
         "net_ball", "dive_ball", "nest_ball", "repeat_ball",
         "timer_ball", "heal_ball", "luxury_ball",
+        # Апокорновые под скорость
+        "fast_ball", "level_ball",
         "protein", "iron", "calcium", "zinc", "carbos", "hp_up", "rare_candy",
         "fire_stone", "water_stone", "thunder_stone", "leaf_stone",
         "moon_stone", "sun_stone", "shiny_stone", "dusk_stone",
@@ -356,6 +404,8 @@ STOCK_BY_LOCATION: dict[str, list[str]] = {
         "pokeball", "greatball", "ultraball",
         "net_ball", "dive_ball", "nest_ball", "repeat_ball",
         "timer_ball", "heal_ball", "luxury_ball", "quick_ball",
+        "premier_ball", "sport_ball", "level_ball", "lure_ball",
+        "moon_ball", "friend_ball", "love_ball", "heavy_ball", "fast_ball",
         "potion", "super_potion", "revive",
     ],
 
@@ -410,6 +460,8 @@ STOCK_BY_LOCATION: dict[str, list[str]] = {
         "bottle_cap", "gold_bottle_cap",
         "mint_adamant", "mint_jolly", "mint_modest", "mint_timid",
         "mint_bold", "mint_calm", "mint_impish", "mint_careful",
+        # Полный набор покеболов
+        *FULL_BALLS,
     ],
 
     "eidolon": [
@@ -452,6 +504,8 @@ STOCK_BY_LOCATION: dict[str, list[str]] = {
         "mint_bold", "mint_calm", "mint_impish", "mint_careful",
         "league_badge", "champion_cape",
         "hall_of_fame_ticket", "elite_pass",
+        # Полный + событийный набор покеболов
+        *LEGENDARY_BALLS,
     ],
 }
 
@@ -496,6 +550,8 @@ async def _shop_autocomplete(
         info = ITEMS.get(key)
         if not info:
             continue
+        if int(info.get("price", 0)) <= 0:
+            continue  # не продаётся
         label = f"{info['name']} — {info['price']:,} PB"
         if not cur or cur in key or cur in str(info["name"]).lower():
             out.append(app_commands.Choice(name=label[:100], value=key))
@@ -522,7 +578,9 @@ class Inventory(commands.Cog):
             description="\n".join(lines) if lines else "Инвентарь пуст. Загляните в /shop",
             color=EMBED_COLOR,
         )
-        embed.set_footer(text=f"Баланс: {t['pokebucks']:,} Pokébucks")
+        embed.set_footer(
+            text=f"{t['name']} • Баланс: {t['pokebucks']:,} Pokébucks"
+        )
         await interaction.response.send_message(embed=embed)
 
     @app_commands.command(
@@ -564,7 +622,15 @@ class Inventory(commands.Cog):
             return
 
         info = ITEMS[key]
-        total = int(info["price"]) * quantity
+        price = int(info["price"])
+        if price <= 0:
+            await interaction.response.send_message(
+                f"❌ **{info['name']}** нельзя купить — только получить от мастера.",
+                ephemeral=True,
+            )
+            return
+
+        total = price * quantity
 
         uid = interaction.user.id
         t_before = await get_trainer(uid)
