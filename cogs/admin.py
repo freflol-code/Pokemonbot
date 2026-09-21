@@ -1,4 +1,4 @@
-"""Мастерские команды — выдача и редактирование покемонов, деньги, победы/поражения."""
+"""Мастерские команды — выдача и редактирование покемонов, деньги, предметы, победы/поражения."""
 import logging
 import os
 import uuid
@@ -11,9 +11,11 @@ from discord.ext import commands
 import pokeapi_client
 from database import (
     MAX_PARTY_SIZE,
+    add_item,
     add_pokebucks,
     add_pokemon,
     add_to_pokedex,
+    get_item_qty,
     get_pokemon,
     get_trainer,
     inc_losses,
@@ -54,6 +56,10 @@ def is_master():
 
     return app_commands.check(predicate)
 
+
+# --------------------------------------------------------------------------- #
+#                              АВТОДОПОЛНЕНИЯ                                 #
+# --------------------------------------------------------------------------- #
 
 async def _species_autocomplete(
     interaction: discord.Interaction, current: str
@@ -118,36 +124,29 @@ async def _instance_autocomplete(
     return out
 
 
-async def _ability_autocomplete(
+async def _item_autocomplete(
     interaction: discord.Interaction, current: str
 ):
-    """Подсказывает способности того покемона, чей ID выбран."""
-    iid = (interaction.namespace.instance_id or "").strip().lower()
-    user: Optional[discord.Member] = interaction.namespace.user
-    if not iid or user is None:
-        return []
-    mon = await get_pokemon(user.id, iid)
-    if not mon:
-        return []
+    """Подсказывает ключи предметов из каталога."""
     try:
-        data = await pokeapi_client.get_pokemon(mon["species_id"])
-    except PokeAPIError:
+        from cogs.inventory import ITEMS
+    except Exception:
         return []
-
-    cur = current.strip().lower()
+    cur = current.strip().lower().replace(" ", "_")
     out = []
-    for ab in data.get("abilities", []) or []:
-        name = ab["name"]
-        if ab.get("is_hidden"):
-            label = f"{name.replace('-', ' ').title()} (скрытая)"
-        else:
-            label = name.replace("-", " ").title()
-        if not cur or cur in name or cur in label.lower():
-            out.append(app_commands.Choice(name=label[:100], value=name))
+    for key, info in ITEMS.items():
+        name = str(info.get("name", key))
+        label = f"{name} ({key})"
+        if not cur or cur in key or cur in name.lower():
+            out.append(app_commands.Choice(name=label[:100], value=key))
         if len(out) >= 25:
             break
     return out
 
+
+# --------------------------------------------------------------------------- #
+#                                  COG                                        #
+# --------------------------------------------------------------------------- #
 
 class Admin(commands.Cog):
     """Команды для мастеров игры."""
@@ -184,7 +183,7 @@ class Admin(commands.Cog):
         gender="Пол. Не укажете — определится случайно по виду.",
         nickname="Кличка (необязательно)",
         moves="Атаки через запятую, 1–4 (не укажете — 4 случайные)",
-        ability="Способность (не укажете — выберется случайная обычная)",
+        ability="Способность. Не укажете — выберется случайная обычная.",
     )
     @app_commands.choices(gender=GENDER_CHOICES)
     @is_master()
@@ -229,7 +228,6 @@ class Admin(commands.Cog):
         else:
             final_moves = pokeapi_client.pick_random_moves(data, 4)
 
-        # Способность: указана мастером или случайная обычная
         if ability:
             final_ability = ability.strip().lower().replace(" ", "-")
         else:
@@ -258,7 +256,9 @@ class Admin(commands.Cog):
         species_data = await load_species([mon])
         title = mon_title(mon, species_data)
         place = "команду" if added_to_party else "ПК"
-        ability_ru = await pokeapi_client.get_ability_ru(final_ability) if final_ability else "—"
+        ability_ru = (
+            await pokeapi_client.get_ability_ru(final_ability) if final_ability else "—"
+        )
 
         embed = discord.Embed(
             title="✅ Покемон выдан",
@@ -438,42 +438,6 @@ class Admin(commands.Cog):
             f"✅ Пол покемона `{iid}` → **{gender.name}**.", ephemeral=True
         )
 
-    # ------------------------------------------------------------------ /gm_set_ability
-
-    @app_commands.command(
-        name="gm_set_ability",
-        description="[Мастер] Изменить способность покемона",
-    )
-    @app_commands.describe(
-        user="Владелец",
-        instance_id="ID покемона",
-        ability="Способность (начните печатать — подскажу из доступных виду)",
-    )
-    @is_master()
-    @app_commands.autocomplete(instance_id=_instance_autocomplete, ability=_ability_autocomplete)
-    async def gm_set_ability(
-        self, interaction: discord.Interaction,
-        user: discord.Member, instance_id: str, ability: str,
-    ) -> None:
-        await interaction.response.defer(ephemeral=True)
-        iid = instance_id.strip().lower()
-        ability_en = ability.strip().lower().replace(" ", "-")
-
-        mon = await get_pokemon(user.id, iid)
-        if not mon:
-            await interaction.followup.send("❌ Покемон не найден.", ephemeral=True)
-            return
-
-        ok = await update_pokemon(user.id, iid, ability=ability_en)
-        if not ok:
-            await interaction.followup.send("❌ Не удалось обновить способность.", ephemeral=True)
-            return
-
-        ability_ru = await pokeapi_client.get_ability_ru(ability_en)
-        await interaction.followup.send(
-            f"✅ Способность покемона `{iid}` → **{ability_ru}**.", ephemeral=True
-        )
-
     # ------------------------------------------------------------------ /give_money
 
     @app_commands.command(name="give_money", description="[Мастер] Выдать или забрать Pokébucks")
@@ -493,6 +457,52 @@ class Admin(commands.Cog):
                 f"**Текущий баланс:** {new_balance:,} PB"
             ),
             color=discord.Color.gold() if amount >= 0 else discord.Color.dark_red(),
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    # ------------------------------------------------------------------ /give_item
+
+    @app_commands.command(
+        name="give_item",
+        description="[Мастер] Выдать игроку предмет из каталога",
+    )
+    @app_commands.describe(
+        user="Кому выдать",
+        item="Ключ предмета (начните печатать — подскажу)",
+        quantity="Сколько (1–999)",
+    )
+    @is_master()
+    @app_commands.autocomplete(item=_item_autocomplete)
+    async def give_item(
+        self,
+        interaction: discord.Interaction,
+        user: discord.Member,
+        item: str,
+        quantity: app_commands.Range[int, 1, 999] = 1,
+    ) -> None:
+        from cogs.inventory import ITEMS
+
+        key = item.strip().lower().replace(" ", "_")
+        if key not in ITEMS:
+            await interaction.response.send_message(
+                f"❌ Предмет `{key}` не найден в каталоге. "
+                f"Начните печатать название — бот подскажет.",
+                ephemeral=True,
+            )
+            return
+
+        await add_item(user.id, key, int(quantity))
+        name = ITEMS[key]["name"]
+        qty_now = await get_item_qty(user.id, key)
+
+        embed = discord.Embed(
+            title="📦 Предмет выдан",
+            description=(
+                f"**Игрок:** {user.mention}\n"
+                f"**Предмет:** {name} × {quantity}\n"
+                f"**Теперь в инвентаре:** {qty_now} шт."
+            ),
+            color=discord.Color.green(),
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
