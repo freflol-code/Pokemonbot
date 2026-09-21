@@ -1,4 +1,4 @@
-"""Ловля покемонов: /catch — простой бросок по шансу покебола."""
+"""Ловля покемонов: /catch с условиями, но чистым выводом."""
 import logging
 import random
 import uuid
@@ -14,19 +14,18 @@ from database import (
     add_to_pokedex,
     get_active_profile,
     get_item_qty,
-    get_trainer,
     take_item,
 )
 from pokeapi_client import PokeAPIError
-from utils import GENDER_EMOJI, format_moves, format_types, load_species
+from utils import GENDER_EMOJI, format_moves, format_types
 
 log = logging.getLogger(__name__)
 
 
 # ==========================================================================
-#  ШАНСЫ ПОИМКИ — фиксированные, без условий
+#  БАЗОВЫЕ ШАНСЫ ПОКЕБОЛОВ
 # ==========================================================================
-BALL_CHANCE: dict[str, float] = {
+BALL_BASE_CHANCE: dict[str, float] = {
     "pokeball": 25.0,
     "greatball": 50.0,
     "ultraball": 70.0,
@@ -100,7 +99,7 @@ BALL_NAMES: dict[str, str] = {
     "gigaton_ball": "Гигатон-болл",
 }
 
-# 20 вариантов в подсказках (лимит Discord — 25)
+# 20 вариантов для подсказок (лимит Discord — 25)
 CATCHABLE_BALLS = [
     "pokeball", "greatball", "ultraball",
     "net_ball", "dive_ball", "nest_ball", "repeat_ball",
@@ -114,22 +113,133 @@ BALL_CHOICES = [
 ]
 
 
+def _is_night() -> bool:
+    import datetime
+    hour = datetime.datetime.now().hour
+    return hour >= 22 or hour < 6
+
+
+def _chance_for_ball(
+    ball_key: str,
+    *,
+    species_id: int = 0,
+    species_types: list[str],
+    level: int,
+    is_wounded: bool,
+    is_badly_wounded: bool,
+    is_night: bool,
+    is_cave: bool,
+    is_underwater: bool,
+    turn_number: int,
+    already_caught: bool,
+) -> float:
+    """Возвращает итоговый шанс (0–100). Без списка причин — только цифра."""
+    base = BALL_BASE_CHANCE.get(ball_key, 25.0)
+
+    # --- Контекстные покеболы ---
+    if ball_key == "net_ball":
+        if "water" in species_types or "bug" in species_types:
+            base += 25.0
+    elif ball_key == "dive_ball":
+        if is_underwater:
+            base += 25.0
+    elif ball_key == "nest_ball":
+        if level < 20:
+            base += 25.0
+    elif ball_key == "repeat_ball":
+        if already_caught:
+            base += 25.0
+    elif ball_key == "timer_ball":
+        base += min(50.0, 5.0 * turn_number)
+    elif ball_key == "quick_ball":
+        if turn_number == 1:
+            base = 95.0
+    elif ball_key == "dusk_ball":
+        if is_night or is_cave:
+            base += 25.0
+    # heal_ball / luxury_ball — без бонуса к шансу
+
+    # --- Апокорновые ---
+    elif ball_key == "sport_ball":
+        if "bug" in species_types:
+            base += 25.0
+    elif ball_key == "level_ball":
+        if level >= 30:
+            base += 30.0
+        elif level >= 20:
+            base += 20.0
+    elif ball_key == "lure_ball":
+        if "water" in species_types:
+            base += 25.0
+    elif ball_key == "moon_ball":
+        if any(t in species_types for t in ("water", "psychic", "fairy", "normal")):
+            base += 25.0
+    elif ball_key == "friend_ball":
+        base += 10.0
+    elif ball_key == "love_ball":
+        base += 15.0
+    elif ball_key == "heavy_ball":
+        if level >= 30:
+            base += 20.0
+    elif ball_key == "fast_ball":
+        if any(t in species_types for t in ("flying", "electric")):
+            base += 25.0
+
+    # --- Legends: Arceus ---
+    elif ball_key == "dream_ball":
+        pass  # условный
+    elif ball_key == "beast_ball":
+        if (793 <= species_id <= 799) or species_id in (803, 804, 805, 806):
+            base = 95.0
+    elif ball_key == "strange_ball":
+        if level >= 20:
+            base += 20.0
+    elif ball_key == "feather_ball":
+        base += 5.0
+    elif ball_key == "wing_ball":
+        base += 10.0
+    elif ball_key == "jet_ball":
+        base += 15.0
+    elif ball_key == "leaden_ball":
+        base += 20.0
+    elif ball_key == "gigaton_ball":
+        base += 30.0
+
+    # --- Модификаторы состояния ---
+    if is_badly_wounded:
+        base += 25.0
+    elif is_wounded:
+        base += 15.0
+
+    return max(5.0, min(100.0, base))
+
+
 class Catch(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
 
     @app_commands.command(
         name="catch",
-        description="Поймать покемона (шанс зависит от покебола)",
+        description="Поймать покемона (шанс зависит от покебола и условий)",
     )
     @app_commands.describe(
         ball="Какой покебол использовать (из инвентаря персонажа)",
+        wounded="Покемон ранен? (+15%)",
+        badly_wounded="Покемон сильно ранен? (+25%)",
+        underwater="Ловля под водой (для Dive Ball)?",
+        cave="Ловля в пещере (для Dusk Ball)?",
+        turn="Номер хода боя (для Timer/Quick Ball)",
     )
     @app_commands.choices(ball=BALL_CHOICES)
     async def catch(
         self,
         interaction: discord.Interaction,
         ball: Optional[app_commands.Choice[str]] = None,
+        wounded: bool = False,
+        badly_wounded: bool = False,
+        underwater: bool = False,
+        cave: bool = False,
+        turn: app_commands.Range[int, 1, 50] = 1,
     ) -> None:
         await interaction.response.defer()
 
@@ -151,7 +261,6 @@ class Catch(commands.Cog):
 
         ball_key = ball.value if ball else "pokeball"
 
-        # Проверка инвентаря
         qty = await get_item_qty(uid, ball_key)
         if qty < 1:
             await interaction.followup.send(
@@ -160,6 +269,37 @@ class Catch(commands.Cog):
                 ephemeral=True,
             )
             return
+
+        # Случайный покемон
+        try:
+            species_id = random.randint(1, 1025)
+            data = await pokeapi_client.get_pokemon(species_id)
+            gender = await pokeapi_client.roll_gender(data["id"])
+        except PokeAPIError as e:
+            await interaction.followup.send(f"⚠️ {e}", ephemeral=True)
+            return
+
+        level = random.randint(2, 15)
+
+        # Проверка «уже пойман» для Repeat Ball
+        from database import get_trainer
+        trainer = await get_trainer(uid)
+        already_caught = data["id"] in trainer.get("pokedex_known", [])
+
+        # Расчёт шанса
+        chance = _chance_for_ball(
+            ball_key,
+            species_id=data["id"],
+            species_types=data["types"],
+            level=level,
+            is_wounded=wounded,
+            is_badly_wounded=badly_wounded,
+            is_night=_is_night(),
+            is_cave=cave,
+            is_underwater=underwater,
+            turn_number=int(turn),
+            already_caught=already_caught,
+        )
 
         # Списываем покебол
         taken = await take_item(uid, ball_key, 1)
@@ -170,20 +310,9 @@ class Catch(commands.Cog):
             return
 
         # Бросок
-        chance = BALL_CHANCE.get(ball_key, 25.0)
         success = random.randint(1, 100) <= round(chance)
 
         if success:
-            # Случайный покемон из Покедекса
-            try:
-                species_id = random.randint(1, 1025)
-                data = await pokeapi_client.get_pokemon(species_id)
-                gender = await pokeapi_client.roll_gender(data["id"])
-            except PokeAPIError as e:
-                await interaction.followup.send(f"⚠️ {e}", ephemeral=True)
-                return
-
-            level = random.randint(2, 15)
             mon = {
                 "instance_id": uuid.uuid4().hex[:8],
                 "species_id": data["id"],
@@ -196,9 +325,8 @@ class Catch(commands.Cog):
             await add_pokemon(uid, mon, to_party=False)
             is_new = await add_to_pokedex(uid, data["id"])
 
-            name = data["name"]
             embed = discord.Embed(
-                title=f"🎉 Поймал: {name}!",
+                title=f"🎉 Поймал: {data['name']}!",
                 description=(
                     f"**Персонаж:** {profile['name']}\n"
                     f"**Покебол:** {BALL_NAMES[ball_key]}\n\n"
