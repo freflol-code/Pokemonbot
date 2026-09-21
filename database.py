@@ -32,6 +32,11 @@ CREATE TABLE IF NOT EXISTS profiles (
     pokebucks    INTEGER NOT NULL DEFAULT 0,
     location     TEXT NOT NULL DEFAULT 'hoshinori',
     is_active    BOOLEAN NOT NULL DEFAULT FALSE,
+    level        INTEGER,
+    moves        TEXT,
+    ability      TEXT,
+    status       TEXT DEFAULT 'wild',
+    pokeball     TEXT,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_profiles_user ON profiles(user_id);
@@ -66,6 +71,14 @@ CREATE TABLE IF NOT EXISTS pokedex (
 );
 """
 
+MIGRATION = """
+ALTER TABLE profiles ADD COLUMN IF NOT EXISTS level INTEGER;
+ALTER TABLE profiles ADD COLUMN IF NOT EXISTS moves TEXT;
+ALTER TABLE profiles ADD COLUMN IF NOT EXISTS ability TEXT;
+ALTER TABLE profiles ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'wild';
+ALTER TABLE profiles ADD COLUMN IF NOT EXISTS pokeball TEXT;
+"""
+
 
 async def connect(database_url: Optional[str] = None) -> None:
     global _pool
@@ -86,13 +99,13 @@ async def connect(database_url: Optional[str] = None) -> None:
 
 
 async def _migrate_or_create(conn: asyncpg.Connection) -> None:
-    """Создаёт новые таблицы или сбрасывает старую схему (trainers)."""
     old_schema = await conn.fetchval("SELECT to_regclass('public.trainers')")
     if old_schema:
         log.warning("Обнаружена старая схема (trainers) — сбрасываю таблицы")
         for tbl in ("pokemon", "inventory", "pokedex", "trainers"):
             await conn.execute(f"DROP TABLE IF EXISTS {tbl} CASCADE")
     await conn.execute(SCHEMA)
+    await conn.execute(MIGRATION)
 
 
 async def close() -> None:
@@ -114,6 +127,10 @@ def _pool_conn() -> asyncpg.Pool:
 # --------------------------------------------------------------------------- #
 
 def _profile_dict(row: asyncpg.Record) -> dict[str, Any]:
+    try:
+        moves = json.loads(row["moves"]) if row["moves"] else []
+    except (json.JSONDecodeError, TypeError):
+        moves = []
     return {
         "profile_id": row["profile_id"],
         "user_id": row["user_id"],
@@ -125,6 +142,11 @@ def _profile_dict(row: asyncpg.Record) -> dict[str, Any]:
         "pokebucks": row["pokebucks"],
         "location": row["location"],
         "is_active": row["is_active"],
+        "level": row["level"],
+        "moves": moves,
+        "ability": row["ability"],
+        "status": row["status"] or "wild",
+        "pokeball": row["pokeball"],
     }
 
 
@@ -134,12 +156,18 @@ async def create_profile(
     profile_type: str = "trainer",
     avatar_url: Optional[str] = None,
     make_active: bool = True,
+    level: Optional[int] = None,
+    moves: Optional[list[str]] = None,
+    ability: Optional[str] = None,
+    status: Optional[str] = None,
+    pokeball: Optional[str] = None,
 ) -> dict[str, Any]:
-    """Создаёт нового персонажа. По умолчанию делает его активным."""
     if profile_type not in PROFILE_TYPES:
         profile_type = "trainer"
 
     pid = uuid.uuid4().hex[:12]
+    moves_json = json.dumps(moves, ensure_ascii=False) if moves else None
+
     pool = _pool_conn()
     async with pool.acquire() as conn:
         if make_active:
@@ -148,9 +176,11 @@ async def create_profile(
             )
         await conn.execute(
             "INSERT INTO profiles "
-            "(profile_id, user_id, name, profile_type, avatar_url, is_active) "
-            "VALUES ($1, $2, $3, $4, $5, $6)",
+            "(profile_id, user_id, name, profile_type, avatar_url, is_active, "
+            " level, moves, ability, status, pokeball) "
+            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
             pid, user_id, name, profile_type, avatar_url, make_active,
+            level, moves_json, ability, status, pokeball,
         )
         row = await conn.fetchrow(
             "SELECT * FROM profiles WHERE profile_id = $1", pid,
@@ -168,7 +198,6 @@ async def get_profile(profile_id: str) -> Optional[dict[str, Any]]:
 
 
 async def list_profiles(user_id: int) -> list[dict[str, Any]]:
-    """Список всех профилей игрока."""
     pool = _pool_conn()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
@@ -179,7 +208,6 @@ async def list_profiles(user_id: int) -> list[dict[str, Any]]:
 
 
 async def get_active_profile(user_id: int) -> Optional[dict[str, Any]]:
-    """Активный профиль. None если у игрока нет ни одного."""
     pool = _pool_conn()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -190,7 +218,6 @@ async def get_active_profile(user_id: int) -> Optional[dict[str, Any]]:
 
 
 async def switch_profile(user_id: int, profile_id: str) -> bool:
-    """Делает указанный профиль активным."""
     pool = _pool_conn()
     async with pool.acquire() as conn:
         exists = await conn.fetchval(
@@ -209,7 +236,6 @@ async def switch_profile(user_id: int, profile_id: str) -> bool:
 
 
 async def delete_profile(user_id: int, profile_id: str) -> bool:
-    """Удаляет профиль. Если он был активен — переключает на первый оставшийся."""
     pool = _pool_conn()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -219,9 +245,7 @@ async def delete_profile(user_id: int, profile_id: str) -> bool:
         if not row:
             return False
         was_active = bool(row["is_active"])
-        await conn.execute(
-            "DELETE FROM profiles WHERE profile_id = $1", profile_id,
-        )
+        await conn.execute("DELETE FROM profiles WHERE profile_id = $1", profile_id)
         if was_active:
             new_active = await conn.fetchrow(
                 "SELECT profile_id FROM profiles WHERE user_id = $1 "
@@ -236,7 +260,6 @@ async def delete_profile(user_id: int, profile_id: str) -> bool:
 
 
 async def _ensure_profile(user_id: int) -> dict[str, Any]:
-    """Возвращает активный профиль или создаёт дефолтный «Тренер»."""
     profile = await get_active_profile(user_id)
     if profile:
         return profile
@@ -247,11 +270,23 @@ async def _ensure_profile(user_id: int) -> dict[str, Any]:
 #                    СОВМЕСТИМОСТЬ СО СТАРЫМИ КОГАМИ                           #
 # --------------------------------------------------------------------------- #
 
-async def get_trainer(user_id: int) -> dict[str, Any]:
-    """Возвращает активный профиль + партию + ПК + инвентарь + покедекс.
+def _pokemon_dict(row: asyncpg.Record) -> dict[str, Any]:
+    try:
+        moves = json.loads(row["moves"]) if row["moves"] else []
+    except json.JSONDecodeError:
+        moves = []
+    return {
+        "instance_id": row["instance_id"],
+        "species_id": row["species_id"],
+        "nickname": row["nickname"],
+        "level": row["level"],
+        "gender": row["gender"],
+        "moves": moves,
+        "ability": row["ability"],
+    }
 
-    Сигнатура старая — user_id. Внутри берём активный профиль.
-    """
+
+async def get_trainer(user_id: int) -> dict[str, Any]:
     profile = await _ensure_profile(user_id)
     pid = profile["profile_id"]
 
@@ -280,24 +315,7 @@ async def get_trainer(user_id: int) -> dict[str, Any]:
     return trainer
 
 
-def _pokemon_dict(row: asyncpg.Record) -> dict[str, Any]:
-    try:
-        moves = json.loads(row["moves"]) if row["moves"] else []
-    except json.JSONDecodeError:
-        moves = []
-    return {
-        "instance_id": row["instance_id"],
-        "species_id": row["species_id"],
-        "nickname": row["nickname"],
-        "level": row["level"],
-        "gender": row["gender"],
-        "moves": moves,
-        "ability": row["ability"],
-    }
-
-
 async def _pid_of(user_id: int) -> str:
-    """Возвращает profile_id активного профиля."""
     profile = await _ensure_profile(user_id)
     return profile["profile_id"]
 
@@ -545,7 +563,6 @@ async def add_to_pokedex(user_id: int, species_id: int) -> bool:
 # --------------------------------------------------------------------------- #
 
 async def reset_trainer(user_id: int) -> None:
-    """Сбрасывает активный профиль (не удаляет). Обнуляет победы/деньги/покемонов."""
     pid = await _pid_of(user_id)
     pool = _pool_conn()
     async with pool.acquire() as conn:
