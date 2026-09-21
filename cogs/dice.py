@@ -59,6 +59,12 @@ class Dice(commands.Cog):
 
         lines = [f"**{interaction.user.display_name}** атакует…", ""]
 
+        if move_accuracy is None:
+            lines.append("Атака не промахивается.")
+        else:
+            lines.append(f"Шанс: **{chance * 100:.0f}%**")
+        lines.append("")
+
         if not hit:
             lines.append("💨 **ПРОМАХ!**")
             color = discord.Color.dark_red()
@@ -91,6 +97,8 @@ class Dice(commands.Cog):
         success = roll <= round(chance * 100)
 
         lines = [f"**{interaction.user.display_name}** уклоняется…", ""]
+        lines.append(f"Шанс: **{chance * 100:.0f}%**")
+        lines.append("")
 
         if success:
             lines.append("✅ **УКЛОНИЛСЯ!**")
