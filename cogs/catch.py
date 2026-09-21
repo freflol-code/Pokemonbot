@@ -118,17 +118,14 @@ BALL_NAMES: dict[str, str] = {
     "gigaton_ball": "Гигатон-болл",
 }
 
-# Покеболы, доступные для /catch (без Masterball и прочих авто-поимок)
 CATCHABLE_BALLS = [
     "pokeball", "greatball", "ultraball",
     "net_ball", "dive_ball", "nest_ball", "repeat_ball",
     "timer_ball", "heal_ball", "luxury_ball", "quick_ball", "dusk_ball",
-    # Новые
     "premier_ball", "sport_ball", "level_ball", "lure_ball",
     "moon_ball", "friend_ball", "love_ball", "heavy_ball", "fast_ball",
     "dream_ball", "beast_ball", "feather_ball", "wing_ball",
     "jet_ball", "leaden_ball", "gigaton_ball",
-    # Событийные (работают, но в магазинах не продаются)
     "cherish_ball", "park_ball", "origin_ball", "gs_ball", "strange_ball",
 ]
 
@@ -157,13 +154,9 @@ def _chance_for_ball(
     turn_number: int,
     already_caught: bool,
 ) -> tuple[float, list[str]]:
-    """Возвращает итоговый шанс (0–100) и список применённых условий."""
     base = BALL_BASE_CHANCE.get(ball_key, 25.0)
     reasons: list[str] = []
 
-    # -------------------------------------------------------------------- #
-    #                        КОНТЕКСТНЫЕ ПОКЕБОЛЫ                          #
-    # -------------------------------------------------------------------- #
     if ball_key == "net_ball":
         if "water" in species_types or "bug" in species_types:
             base += 25.0
@@ -210,9 +203,6 @@ def _chance_for_ball(
     elif ball_key == "luxury_ball":
         reasons.append("✨ Luxury Ball: покемон станет дружелюбнее")
 
-    # -------------------------------------------------------------------- #
-    #                         НОВЫЕ ПОКЕБОЛЫ                               #
-    # -------------------------------------------------------------------- #
     elif ball_key == "sport_ball":
         if "bug" in species_types:
             base += 25.0
@@ -290,9 +280,6 @@ def _chance_for_ball(
     elif ball_key in ("cherish_ball", "park_ball", "origin_ball", "gs_ball"):
         reasons.append("⭐ Особый болл — 100%")
 
-    # -------------------------------------------------------------------- #
-    #                        СОСТОЯНИЕ ПОКЕМОНА                            #
-    # -------------------------------------------------------------------- #
     if is_badly_wounded:
         base += 25.0
         reasons.append("🩸 Покемон сильно ранен (+25%)")
@@ -314,9 +301,9 @@ class Catch(commands.Cog):
     )
     @app_commands.describe(
         ball="Тип покебола (используется из инвентаря персонажа)",
-        wounded="Покемон ранен? (для расчёта шанса)",
+        wounded="Покемон ранен?",
         badly_wounded="Покемон сильно ранен?",
-        underwater="Ловля под водой (для Dive/Lure Ball)?",
+        underwater="Ловля под водой (для Dive Ball)?",
         cave="Ловля в пещере (для Dusk Ball)?",
         turn="Номер хода боя (для Timer/Quick Ball)",
     )
