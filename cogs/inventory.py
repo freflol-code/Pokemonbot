@@ -56,7 +56,7 @@ ITEMS: dict[str, dict[str, object]] = {
     "quick_ball":     {"name": "Квикбол",                    "price": 400},
     "dusk_ball":      {"name": "Дускбол",                    "price": 180},
 
-    # ---- Новые покеболы (событийные / редкие) ----
+    # ---- Новые покеболы ----
     "premier_ball":   {"name": "Премьер-болл",               "price": 100},
     "cherish_ball":   {"name": "Чериш-болл",                 "price": 0},
     "park_ball":      {"name": "Парк-болл",                  "price": 0},
@@ -256,7 +256,6 @@ DEFAULT_STOCK: list[str] = [
     "potion", "super_potion", "revive",
 ]
 
-# Полный ассортимент — с новыми покеболами
 FULL_BALLS: list[str] = [
     "pokeball", "greatball", "ultraball",
     "net_ball", "dive_ball", "nest_ball", "repeat_ball",
@@ -267,25 +266,20 @@ FULL_BALLS: list[str] = [
     "feather_ball", "wing_ball", "jet_ball", "leaden_ball", "gigaton_ball",
 ]
 
-# Расширенный набор — с событийными (только для Эйдолона)
 LEGENDARY_BALLS: list[str] = FULL_BALLS + [
     "cherish_ball", "park_ball", "origin_ball", "gs_ball", "strange_ball",
 ]
 
 ASTERIS_STOCK: list[str] = [
-    # Расходники
     "pokeball", "greatball", "ultraball",
     "potion", "super_potion", "hyper_potion", "max_potion",
     "revive", "max_revive", "antidote", "full_heal", "max_honey",
-    # Камни эволюции
     "fire_stone", "water_stone", "thunder_stone", "leaf_stone",
     "moon_stone", "sun_stone", "shiny_stone", "dusk_stone",
     "dawn_stone", "ice_stone",
-    # Мега-камни
     "mega_stone_aggron", "mega_stone_gengar", "mega_stone_lucario",
     "mega_stone_garchomp", "mega_stone_metagross", "mega_stone_salamence",
     "mega_stone_dragonite", "mega_stone_charizard_x", "mega_stone_charizard_y",
-    # Z-кольцо и кристаллы
     "z_ring",
     "z_crystal_normal", "z_crystal_fire", "z_crystal_water",
     "z_crystal_electric", "z_crystal_grass", "z_crystal_ice",
@@ -293,9 +287,7 @@ ASTERIS_STOCK: list[str] = [
     "z_crystal_flying", "z_crystal_bug", "z_crystal_rock",
     "z_crystal_steel", "z_crystal_dark", "z_crystal_fairy",
     "z_crystal_dragon", "z_crystal_ghost", "z_crystal_psychic",
-    # Динамакс
     "dynamax_band",
-    # Полный набор покеболов
     *FULL_BALLS,
 ]
 
@@ -309,7 +301,6 @@ STOCK_BY_LOCATION: dict[str, list[str]] = {
         "white_herb", "mental_herb", "power_herb",
         "net_ball", "dive_ball", "nest_ball", "repeat_ball",
         "timer_ball", "heal_ball", "luxury_ball", "quick_ball",
-        # Апокорновые для «Луга»
         "friend_ball", "love_ball", "moon_ball",
         "protein", "iron", "calcium", "zinc", "carbos", "hp_up", "rare_candy",
     ],
@@ -358,7 +349,6 @@ STOCK_BY_LOCATION: dict[str, list[str]] = {
         "choice_band", "choice_specs", "choice_scarf",
         "life_orb", "focus_sash", "leftovers",
         "assault_vest", "expert_belt", "rocky_helmet",
-        # Полный набор покеболов
         *FULL_BALLS,
     ],
 
@@ -371,7 +361,6 @@ STOCK_BY_LOCATION: dict[str, list[str]] = {
         "white_herb", "mental_herb", "power_herb",
         "net_ball", "dive_ball", "nest_ball", "repeat_ball",
         "timer_ball", "heal_ball", "luxury_ball",
-        # Апокорновые под скорость
         "fast_ball", "level_ball",
         "protein", "iron", "calcium", "zinc", "carbos", "hp_up", "rare_candy",
         "fire_stone", "water_stone", "thunder_stone", "leaf_stone",
@@ -460,7 +449,6 @@ STOCK_BY_LOCATION: dict[str, list[str]] = {
         "bottle_cap", "gold_bottle_cap",
         "mint_adamant", "mint_jolly", "mint_modest", "mint_timid",
         "mint_bold", "mint_calm", "mint_impish", "mint_careful",
-        # Полный набор покеболов
         *FULL_BALLS,
     ],
 
@@ -504,19 +492,16 @@ STOCK_BY_LOCATION: dict[str, list[str]] = {
         "mint_bold", "mint_calm", "mint_impish", "mint_careful",
         "league_badge", "champion_cape",
         "hall_of_fame_ticket", "elite_pass",
-        # Полный + событийный набор покеболов
         *LEGENDARY_BALLS,
     ],
 }
 
 
 def stock_for_location(loc_key: str) -> list[str]:
-    """Возвращает список предметов для локации. Если нет — стандартный."""
     return STOCK_BY_LOCATION.get(loc_key, DEFAULT_STOCK)
 
 
 def _load_shop_channels() -> dict[int, str]:
-    """{channel_id: location_key} — из переменных SHOP_CHANNEL_<KEY>."""
     mapping: dict[int, str] = {}
     for loc_key in LOCATION_NAMES.keys():
         raw = os.getenv(f"SHOP_CHANNEL_{loc_key.upper()}", "").strip()
@@ -539,7 +524,6 @@ def _location_by_channel(channel_id: int) -> str | None:
 async def _shop_autocomplete(
     interaction: discord.Interaction, current: str
 ) -> list[app_commands.Choice[str]]:
-    """Показывает товары, доступные в текущем канале-магазине."""
     loc_key = _location_by_channel(interaction.channel_id or 0)
     if loc_key is None:
         return []
@@ -551,7 +535,7 @@ async def _shop_autocomplete(
         if not info:
             continue
         if int(info.get("price", 0)) <= 0:
-            continue  # не продаётся
+            continue
         label = f"{info['name']} — {info['price']:,} PB"
         if not cur or cur in key or cur in str(info["name"]).lower():
             out.append(app_commands.Choice(name=label[:100], value=key))
