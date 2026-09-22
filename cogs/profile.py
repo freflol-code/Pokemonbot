@@ -13,7 +13,7 @@ from database import (
     list_profiles,
     switch_profile,
 )
-from utils import EMBED_COLOR, format_moves
+from utils import BADGE_EMOJI, BADGE_RU, EMBED_COLOR, format_moves
 
 PROFILE_TYPE_CHOICES = [
     app_commands.Choice(name="🎓 Тренер", value="trainer"),
@@ -53,7 +53,6 @@ def _ptype_label(ptype: str) -> str:
 
 
 def _status_label(status: str | None, pokeball: str | None) -> str:
-    """Дикий — без покебола. Пойман — с покеболом."""
     status = status or "wild"
     if status == "caught":
         ball_name = POKEBALL_LABEL.get(pokeball, pokeball) if pokeball else "не указан"
@@ -67,10 +66,16 @@ def _gender_label(gender: str | None) -> str:
     return GENDER_LABEL.get(gender, gender)
 
 
+def _format_badges(badges: list[str]) -> str:
+    """Возвращает строку с эмодзи значков или '—'."""
+    if not badges:
+        return "—"
+    return " ".join(BADGE_EMOJI.get(b, "🏅") for b in badges)
+
+
 async def _profile_autocomplete(
     interaction: discord.Interaction, current: str
 ) -> list[app_commands.Choice[str]]:
-    """Автодополнение: показывает профили текущего игрока."""
     profiles = await list_profiles(interaction.user.id)
     cur = current.strip().lower()
     out: list[app_commands.Choice[str]] = []
@@ -259,6 +264,9 @@ class Profile(commands.Cog):
                     f"🎓 Тренер • 🏆 {p['wins']} • 💔 {p['losses']} • "
                     f"💰 {p['pokebucks']:,} PB"
                 )
+                badges = p.get("badges") or []
+                if badges:
+                    detail += f"\n🎖️ Значки: {_format_badges(badges)}"
             embed.add_field(
                 name=f"{marker}{p['name']}",
                 value=f"{detail}\nID: `{p['profile_id']}`",
@@ -321,7 +329,6 @@ class Profile(commands.Cog):
             )
             return
 
-        # Кнопка подтверждения
         view = ConfirmDeleteView(
             owner_id=interaction.user.id,
             profile_id=pid,
@@ -401,6 +408,11 @@ class Profile(commands.Cog):
             embed.add_field(name="📖 Известно видов", value=str(len(t["pokedex_known"])))
             embed.add_field(name="🎒 Команда", value=f"{len(t['party'])}/6")
             embed.add_field(name="🖥️ ПК", value=str(len(t["pc"])))
+            embed.add_field(
+                name=f"🎖️ Значки ({len(t.get('badges') or [])}/18)",
+                value=_format_badges(t.get("badges") or []),
+                inline=False,
+            )
 
         embed.set_footer(
             text=f"ID: {active['profile_id']} • Тренер: {target.display_name}"
@@ -453,8 +465,6 @@ class Profile(commands.Cog):
 # --------------------------------------------------------------------------- #
 
 class ConfirmDeleteView(discord.ui.View):
-    """Подтверждение удаления профиля — кнопками."""
-
     def __init__(
         self,
         owner_id: int,
