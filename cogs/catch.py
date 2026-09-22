@@ -7,7 +7,9 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from database import get_active_profile, get_item_qty, take_item
+import pokeapi_client
+from database import get_active_profile, get_item_qty, get_trainer, take_item
+from pokeapi_client import PokeAPIError
 
 log = logging.getLogger(__name__)
 
@@ -101,14 +103,14 @@ BALL_CHOICES = [
     app_commands.Choice(name=BALL_NAMES[k], value=k) for k in CATCHABLE_BALLS
 ]
 
-# Статусы: высокий бонус ×2.5, низкий ×1.5
+# Статусы: Сон/Заморозка ×2.5, Паралич/Ожог/Отравление ×1.5
 STATUS_CHOICES = [
-    app_commands.Choice(name="💤 Сон", value="sleep"),
-    app_commands.Choice(name="❄️ Заморозка", value="freeze"),
-    app_commands.Choice(name="🟨 Паралич", value="paralysis"),
-    app_commands.Choice(name="🟥 Ожог", value="burn"),
-    app_commands.Choice(name="🟪 Отравление", value="poison"),
     app_commands.Choice(name="— Нет статуса", value="none"),
+    app_commands.Choice(name="💤 Сон (×2.5)", value="sleep"),
+    app_commands.Choice(name="❄️ Заморозка (×2.5)", value="freeze"),
+    app_commands.Choice(name="🟨 Паралич (×1.5)", value="paralysis"),
+    app_commands.Choice(name="🟥 Ожог (×1.5)", value="burn"),
+    app_commands.Choice(name="🟪 Отравление (×1.5)", value="poison"),
 ]
 
 STATUS_MULTIPLIER: dict[str, float] = {
@@ -145,6 +147,7 @@ def _chance_for_ball(
     """Возвращает итоговый шанс (0–100)."""
     base = BALL_BASE_CHANCE.get(ball_key, 25.0)
 
+    # --- Контекстные покеболы ---
     if ball_key == "net_ball":
         if "water" in species_types or "bug" in species_types:
             base += 25.0
@@ -206,13 +209,13 @@ def _chance_for_ball(
     elif ball_key == "gigaton_ball":
         base += 30.0
 
-    # Состояние
+    # --- Состояние ---
     if is_badly_wounded:
         base += 25.0
     elif is_wounded:
         base += 15.0
 
-    # Статус — умножаем шанс
+    # --- Статус ---
     status_mult = STATUS_MULTIPLIER.get(status, 1.0)
     base = base * status_mult
 
@@ -229,9 +232,9 @@ class Catch(commands.Cog):
     )
     @app_commands.describe(
         ball="Покебол из инвентаря персонажа",
-        wounded="Покемон ранен?",
-        badly_wounded="Сильно ранен?",
-        status="Статус покемона (Сон/Заморозка ×2.5, остальные ×1.5)",
+        status="Статус покемона (Сон/Заморозка ×2.5, Паралич/Ожог/Яд ×1.5)",
+        wounded="Покемон ранен? (+15%)",
+        badly_wounded="Сильно ранен? (+25%)",
         underwater="Под водой (для Dive Ball)?",
         cave="В пещере (для Dusk Ball)?",
         turn="Номер хода (для Timer/Quick Ball)",
@@ -241,9 +244,9 @@ class Catch(commands.Cog):
         self,
         interaction: discord.Interaction,
         ball: Optional[app_commands.Choice[str]] = None,
+        status: Optional[app_commands.Choice[str]] = None,
         wounded: bool = False,
         badly_wounded: bool = False,
-        status: Optional[app_commands.Choice[str]] = None,
         underwater: bool = False,
         cave: bool = False,
         turn: app_commands.Range[int, 1, 50] = 1,
@@ -275,12 +278,32 @@ class Catch(commands.Cog):
             )
             return
 
-        # Просто для проверки — «уже пойман» не нужен, но для Repeat Ball
-        # можно было бы использовать. Сейчас считаем, что вид новый.
+        # ------------------------------------------------------------------ #
+        #  Честный расчёт: сначала берём покемона, считаем шанс,
+        #  но игроку имя не показываем.
+        # ------------------------------------------------------------------ #
+        species_id = 0
+        species_types: list[str] = []
+        try:
+            species_id = random.randint(1, 1025)
+            data = await pokeapi_client.get_pokemon(species_id)
+            species_types = data.get("types", [])
+        except PokeAPIError:
+            # Если PokéAPI недоступен — играем без бонусов к типам
+            species_id = 0
+            species_types = []
+
+        level = random.randint(2, 15)
+
+        # Repeat Ball: проверяем, есть ли вид в покедексе
+        trainer = await get_trainer(uid)
+        already_caught = species_id in trainer.get("pokedex_known", [])
+
         chance = _chance_for_ball(
             ball_key,
-            species_types=[],
-            level=10,
+            species_id=species_id,
+            species_types=species_types,
+            level=level,
             is_wounded=wounded,
             is_badly_wounded=badly_wounded,
             status=status_key,
@@ -288,7 +311,7 @@ class Catch(commands.Cog):
             is_cave=cave,
             is_underwater=underwater,
             turn_number=int(turn),
-            already_caught=False,
+            already_caught=already_caught,
         )
 
         taken = await take_item(uid, ball_key, 1)
