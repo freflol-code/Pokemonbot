@@ -23,6 +23,51 @@ TYPE_RU: dict[str, str] = {
     "dark": "Тьма", "steel": "Сталь", "fairy": "Фея",
 }
 
+# ==========================================================================
+#  ЗНАЧКИ: 18 типов
+# ==========================================================================
+BADGE_EMOJI: dict[str, str] = {
+    "normal":   "⚪",
+    "fire":     "🔥",
+    "water":    "💧",
+    "electric": "⚡",
+    "grass":    "🌿",
+    "ice":      "❄️",
+    "fighting": "🥊",
+    "poison":   "☠️",
+    "ground":   "🏜️",
+    "flying":   "🕊️",
+    "psychic":  "🔮",
+    "bug":      "🐛",
+    "rock":     "🪨",
+    "ghost":    "👻",
+    "dragon":   "🐉",
+    "dark":     "🌑",
+    "steel":    "⚙️",
+    "fairy":    "✨",
+}
+
+BADGE_RU: dict[str, str] = {
+    "normal":   "Значок Нормального типа",
+    "fire":     "Значок Огня",
+    "water":    "Значок Воды",
+    "electric": "Значок Электричества",
+    "grass":    "Значок Травы",
+    "ice":      "Значок Льда",
+    "fighting": "Значок Боевого типа",
+    "poison":   "Значок Яда",
+    "ground":   "Значок Земли",
+    "flying":   "Значок Полёта",
+    "psychic":  "Значок Психики",
+    "bug":      "Значок Жука",
+    "rock":     "Значок Камня",
+    "ghost":    "Значок Призрака",
+    "dragon":   "Значок Дракона",
+    "dark":     "Значок Тьмы",
+    "steel":    "Значок Стали",
+    "fairy":    "Значок Феи",
+}
+
 
 async def load_species(
     items: Iterable[dict[str, Any] | int],
@@ -67,20 +112,12 @@ def format_gender(gender: str | None) -> str:
 
 
 def format_ability(ability_en: str | None) -> str:
-    """Красивое отображение способности (без перевода — перевод асинхронный).
-
-    'flash-fire' → 'Flash Fire'. Если способности нет — '—'.
-    """
     if not ability_en:
         return "—"
     return str(ability_en).replace("-", " ").title()
 
 
 async def load_abilities_ru(items: Iterable[dict[str, Any]]) -> dict[str, str]:
-    """Асинхронно подтягивает русские названия для всех уникальных способностей.
-
-    Возвращает {английское_имя: русское_имя}.
-    """
     names: set[str] = set()
     for mon in items:
         ab = mon.get("ability") if isinstance(mon, dict) else None
@@ -101,7 +138,6 @@ async def load_abilities_ru(items: Iterable[dict[str, Any]]) -> dict[str, str]:
 
 
 def mon_title(mon: dict[str, Any], species: dict[int, dict[str, Any]]) -> str:
-    """Заголовок для покемона: 'Кличка (Вид) ♂' или 'Вид ♀'."""
     sname = species_name(species, mon.get("species_id", 0))
     nick = mon.get("nickname")
     title = f"{nick} ({sname})" if nick else sname
