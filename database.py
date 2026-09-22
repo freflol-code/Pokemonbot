@@ -17,6 +17,13 @@ START_LOCATION = "hoshinori"
 
 PROFILE_TYPES = ("trainer", "pokemon")
 
+# 18 типов — 18 значков
+BADGE_TYPES = (
+    "normal", "fire", "water", "electric", "grass", "ice",
+    "fighting", "poison", "ground", "flying", "psychic", "bug",
+    "rock", "ghost", "dragon", "dark", "steel", "fairy",
+)
+
 _pool: Optional[asyncpg.Pool] = None
 
 
@@ -38,6 +45,7 @@ CREATE TABLE IF NOT EXISTS profiles (
     status       TEXT DEFAULT 'wild',
     pokeball     TEXT,
     gender       TEXT,
+    badges       TEXT NOT NULL DEFAULT '[]',
     created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_profiles_user ON profiles(user_id);
@@ -79,6 +87,7 @@ ALTER TABLE profiles ADD COLUMN IF NOT EXISTS ability TEXT;
 ALTER TABLE profiles ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'wild';
 ALTER TABLE profiles ADD COLUMN IF NOT EXISTS pokeball TEXT;
 ALTER TABLE profiles ADD COLUMN IF NOT EXISTS gender TEXT;
+ALTER TABLE profiles ADD COLUMN IF NOT EXISTS badges TEXT NOT NULL DEFAULT '[]';
 """
 
 
@@ -129,6 +138,14 @@ def _profile_dict(row: asyncpg.Record) -> dict[str, Any]:
         moves = json.loads(row["moves"]) if row["moves"] else []
     except (json.JSONDecodeError, TypeError):
         moves = []
+
+    try:
+        badges = json.loads(row["badges"]) if row.get("badges") else []
+        if not isinstance(badges, list):
+            badges = []
+    except (json.JSONDecodeError, TypeError):
+        badges = []
+
     return {
         "profile_id": row["profile_id"],
         "user_id": row["user_id"],
@@ -146,6 +163,7 @@ def _profile_dict(row: asyncpg.Record) -> dict[str, Any]:
         "status": row["status"] or "wild",
         "pokeball": row["pokeball"],
         "gender": row["gender"],
+        "badges": badges,
     }
 
 
@@ -197,8 +215,8 @@ async def create_profile(
         await conn.execute(
             "INSERT INTO profiles "
             "(profile_id, user_id, name, profile_type, avatar_url, is_active, "
-            " level, moves, ability, status, pokeball, gender) "
-            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+            " level, moves, ability, status, pokeball, gender, badges) "
+            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, '[]')",
             pid, user_id, name, profile_type, avatar_url, make_active,
             level, moves_json, ability, status, pokeball, gender,
         )
@@ -292,6 +310,87 @@ async def _pid_of(user_id: int) -> str:
 
 
 # --------------------------------------------------------------------------- #
+#                                  ЗНАЧКИ                                      #
+# --------------------------------------------------------------------------- #
+
+async def get_badges_by_profile(profile_id: str) -> list[str]:
+    pool = _pool_conn()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT badges FROM profiles WHERE profile_id = $1", profile_id,
+        )
+    if not row or not row["badges"]:
+        return []
+    try:
+        badges = json.loads(row["badges"])
+        return badges if isinstance(badges, list) else []
+    except (json.JSONDecodeError, TypeError):
+        return []
+
+
+async def add_badge_by_profile(profile_id: str, badge: str) -> bool:
+    """Добавляет значок. True если добавлен, False если уже есть/не найден профиль."""
+    badge = badge.strip().lower()
+    if badge not in BADGE_TYPES:
+        return False
+
+    pool = _pool_conn()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT badges FROM profiles WHERE profile_id = $1", profile_id,
+        )
+        if row is None:
+            return False
+
+        try:
+            current = json.loads(row["badges"]) if row["badges"] else []
+            if not isinstance(current, list):
+                current = []
+        except (json.JSONDecodeError, TypeError):
+            current = []
+
+        if badge in current:
+            return False
+
+        current.append(badge)
+        await conn.execute(
+            "UPDATE profiles SET badges = $1 WHERE profile_id = $2",
+            json.dumps(current, ensure_ascii=False), profile_id,
+        )
+    return True
+
+
+async def remove_badge_by_profile(profile_id: str, badge: str) -> bool:
+    """Убирает значок. True если убран, False если не было/не найден."""
+    badge = badge.strip().lower()
+
+    pool = _pool_conn()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT badges FROM profiles WHERE profile_id = $1", profile_id,
+        )
+        if row is None:
+            return False
+
+        try:
+            current = json.loads(row["badges"]) if row["badges"] else []
+            if not isinstance(current, list):
+                current = []
+        except (json.JSONDecodeError, TypeError):
+            current = []
+
+        if badge not in current:
+            return False
+
+        current.remove(badge)
+        await conn.execute(
+            "UPDATE profiles SET badges = $1 WHERE profile_id = $2",
+            json.dumps(current, ensure_ascii=False), profile_id,
+        )
+    return True
+
+
+# --------------------------------------------------------------------------- #
 #                          ОБЁРТКА ДЛЯ СТАРЫХ КОГОВ                            #
 # --------------------------------------------------------------------------- #
 
@@ -325,7 +424,6 @@ async def get_trainer(user_id: int) -> dict[str, Any]:
 
 
 async def get_profile_full(profile_id: str) -> Optional[dict[str, Any]]:
-    """Возвращает профиль с партией, ПК, инвентарём и покедексом по его ID."""
     profile = await get_profile(profile_id)
     if not profile:
         return None
@@ -369,13 +467,11 @@ async def set_location(user_id: int, location: str) -> None:
 
 
 async def add_pokebucks(user_id: int, amount: int) -> int:
-    """Начисляет деньги активному профилю."""
     pid = await _pid_of(user_id)
     return await add_pokebucks_by_profile(pid, amount)
 
 
 async def add_pokebucks_by_profile(profile_id: str, amount: int) -> int:
-    """Начисляет деньги указанному профилю. Возвращает новый баланс."""
     pool = _pool_conn()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -404,7 +500,6 @@ async def spend_pokebucks(user_id: int, cost: int) -> bool:
 
 
 async def inc_wins(user_id: int, amount: int = 1) -> None:
-    """Начисляет победы активному профилю."""
     pid = await _pid_of(user_id)
     await inc_wins_by_profile(pid, amount)
 
@@ -420,7 +515,6 @@ async def inc_wins_by_profile(profile_id: str, amount: int = 1) -> bool:
 
 
 async def inc_losses(user_id: int, amount: int = 1) -> None:
-    """Начисляет поражения активному профилю."""
     pid = await _pid_of(user_id)
     await inc_losses_by_profile(pid, amount)
 
@@ -692,6 +786,7 @@ async def reset_trainer(user_id: int) -> None:
         await conn.execute("DELETE FROM inventory WHERE profile_id = $1", pid)
         await conn.execute("DELETE FROM pokedex   WHERE profile_id = $1", pid)
         await conn.execute(
-            "UPDATE profiles SET wins = 0, losses = 0, pokebucks = 0 WHERE profile_id = $1",
+            "UPDATE profiles SET wins = 0, losses = 0, pokebucks = 0, badges = '[]' "
+            "WHERE profile_id = $1",
             pid,
         )
