@@ -1,4 +1,4 @@
-"""Ловля покемонов: /catch — только результат броска."""
+"""Ловля покемонов: /catch — условия вводишь, результат видишь."""
 import logging
 import random
 from typing import Optional
@@ -101,6 +101,123 @@ BALL_CHOICES = [
     app_commands.Choice(name=BALL_NAMES[k], value=k) for k in CATCHABLE_BALLS
 ]
 
+# Статусы: высокий бонус ×2.5, низкий ×1.5
+STATUS_CHOICES = [
+    app_commands.Choice(name="💤 Сон", value="sleep"),
+    app_commands.Choice(name="❄️ Заморозка", value="freeze"),
+    app_commands.Choice(name="🟨 Паралич", value="paralysis"),
+    app_commands.Choice(name="🟥 Ожог", value="burn"),
+    app_commands.Choice(name="🟪 Отравление", value="poison"),
+    app_commands.Choice(name="— Нет статуса", value="none"),
+]
+
+STATUS_MULTIPLIER: dict[str, float] = {
+    "sleep": 2.5,
+    "freeze": 2.5,
+    "paralysis": 1.5,
+    "burn": 1.5,
+    "poison": 1.5,
+    "none": 1.0,
+}
+
+
+def _is_night() -> bool:
+    import datetime
+    hour = datetime.datetime.now().hour
+    return hour >= 22 or hour < 6
+
+
+def _chance_for_ball(
+    ball_key: str,
+    *,
+    species_id: int = 0,
+    species_types: list[str],
+    level: int,
+    is_wounded: bool,
+    is_badly_wounded: bool,
+    status: str,
+    is_night: bool,
+    is_cave: bool,
+    is_underwater: bool,
+    turn_number: int,
+    already_caught: bool,
+) -> float:
+    """Возвращает итоговый шанс (0–100)."""
+    base = BALL_BASE_CHANCE.get(ball_key, 25.0)
+
+    if ball_key == "net_ball":
+        if "water" in species_types or "bug" in species_types:
+            base += 25.0
+    elif ball_key == "dive_ball":
+        if is_underwater:
+            base += 25.0
+    elif ball_key == "nest_ball":
+        if level < 20:
+            base += 25.0
+    elif ball_key == "repeat_ball":
+        if already_caught:
+            base += 25.0
+    elif ball_key == "timer_ball":
+        base += min(50.0, 5.0 * turn_number)
+    elif ball_key == "quick_ball":
+        if turn_number == 1:
+            base = 95.0
+    elif ball_key == "dusk_ball":
+        if is_night or is_cave:
+            base += 25.0
+    elif ball_key == "sport_ball":
+        if "bug" in species_types:
+            base += 25.0
+    elif ball_key == "level_ball":
+        if level >= 30:
+            base += 30.0
+        elif level >= 20:
+            base += 20.0
+    elif ball_key == "lure_ball":
+        if "water" in species_types:
+            base += 25.0
+    elif ball_key == "moon_ball":
+        if any(t in species_types for t in ("water", "psychic", "fairy", "normal")):
+            base += 25.0
+    elif ball_key == "friend_ball":
+        base += 10.0
+    elif ball_key == "love_ball":
+        base += 15.0
+    elif ball_key == "heavy_ball":
+        if level >= 30:
+            base += 20.0
+    elif ball_key == "fast_ball":
+        if any(t in species_types for t in ("flying", "electric")):
+            base += 25.0
+    elif ball_key == "beast_ball":
+        if (793 <= species_id <= 799) or species_id in (803, 804, 805, 806):
+            base = 95.0
+    elif ball_key == "strange_ball":
+        if level >= 20:
+            base += 20.0
+    elif ball_key == "feather_ball":
+        base += 5.0
+    elif ball_key == "wing_ball":
+        base += 10.0
+    elif ball_key == "jet_ball":
+        base += 15.0
+    elif ball_key == "leaden_ball":
+        base += 20.0
+    elif ball_key == "gigaton_ball":
+        base += 30.0
+
+    # Состояние
+    if is_badly_wounded:
+        base += 25.0
+    elif is_wounded:
+        base += 15.0
+
+    # Статус — умножаем шанс
+    status_mult = STATUS_MULTIPLIER.get(status, 1.0)
+    base = base * status_mult
+
+    return max(5.0, min(100.0, base))
+
 
 class Catch(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
@@ -114,17 +231,19 @@ class Catch(commands.Cog):
         ball="Покебол из инвентаря персонажа",
         wounded="Покемон ранен?",
         badly_wounded="Сильно ранен?",
+        status="Статус покемона (Сон/Заморозка ×2.5, остальные ×1.5)",
         underwater="Под водой (для Dive Ball)?",
         cave="В пещере (для Dusk Ball)?",
         turn="Номер хода (для Timer/Quick Ball)",
     )
-    @app_commands.choices(ball=BALL_CHOICES)
+    @app_commands.choices(ball=BALL_CHOICES, status=STATUS_CHOICES)
     async def catch(
         self,
         interaction: discord.Interaction,
         ball: Optional[app_commands.Choice[str]] = None,
         wounded: bool = False,
         badly_wounded: bool = False,
+        status: Optional[app_commands.Choice[str]] = None,
         underwater: bool = False,
         cave: bool = False,
         turn: app_commands.Range[int, 1, 50] = 1,
@@ -146,6 +265,7 @@ class Catch(commands.Cog):
             return
 
         ball_key = ball.value if ball else "pokeball"
+        status_key = status.value if status else "none"
 
         qty = await get_item_qty(uid, ball_key)
         if qty < 1:
@@ -155,41 +275,22 @@ class Catch(commands.Cog):
             )
             return
 
-        # Базовый шанс + модификаторы условий
-        chance = BALL_BASE_CHANCE.get(ball_key, 25.0)
+        # Просто для проверки — «уже пойман» не нужен, но для Repeat Ball
+        # можно было бы использовать. Сейчас считаем, что вид новый.
+        chance = _chance_for_ball(
+            ball_key,
+            species_types=[],
+            level=10,
+            is_wounded=wounded,
+            is_badly_wounded=badly_wounded,
+            status=status_key,
+            is_night=_is_night(),
+            is_cave=cave,
+            is_underwater=underwater,
+            turn_number=int(turn),
+            already_caught=False,
+        )
 
-        # Timer Ball: растёт с ходом
-        if ball_key == "timer_ball":
-            chance += min(50.0, 5.0 * turn)
-
-        # Quick Ball: 95% на первом ходу
-        if ball_key == "quick_ball" and turn == 1:
-            chance = 95.0
-
-        # Dusk Ball: +25% ночью или в пещере
-        if ball_key == "dusk_ball" and cave:
-            chance += 25.0
-        elif ball_key == "dusk_ball":
-            import datetime
-            hour = datetime.datetime.now().hour
-            if hour >= 22 or hour < 6:
-                chance += 25.0
-
-        # Dive Ball: +25% под водой
-        if ball_key == "dive_ball" and underwater:
-            chance += 25.0
-
-        # Nest Ball: +25% если уровень < 20 (не проверяем, доверяем мастеру)
-
-        # Состояние покемона
-        if badly_wounded:
-            chance += 25.0
-        elif wounded:
-            chance += 15.0
-
-        chance = max(5.0, min(100.0, chance))
-
-        # Списываем покебол
         taken = await take_item(uid, ball_key, 1)
         if not taken:
             await interaction.followup.send(
@@ -197,7 +298,6 @@ class Catch(commands.Cog):
             )
             return
 
-        # Бросок
         success = random.randint(1, 100) <= round(chance)
 
         embed = discord.Embed(
