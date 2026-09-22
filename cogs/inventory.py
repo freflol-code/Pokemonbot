@@ -1,4 +1,4 @@
-"""Инвентарь и магазин, привязанный к каналу."""
+"""Инвентарь, магазин и использование предметов."""
 from __future__ import annotations
 
 import os
@@ -7,8 +7,15 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from database import add_item, get_item_qty, get_trainer, spend_pokebucks
+from database import (
+    add_item,
+    get_item_qty,
+    get_trainer,
+    spend_pokebucks,
+    take_item,
+)
 from utils import EMBED_COLOR
+
 
 # ==========================================================================
 #  КАТАЛОГ ПРЕДМЕТОВ
@@ -29,7 +36,7 @@ ITEMS: dict[str, dict[str, object]] = {
     "full_heal":      {"name": "Полное лечение",             "price": 600},
     "max_honey":      {"name": "Макс-мёд",                   "price": 2500},
 
-    # ---- Зелья и восстановление (для Вердена) ----
+    # ---- Зелья и восстановление ----
     "fresh_water":    {"name": "Свежая вода",                "price": 200},
     "soda_pop":       {"name": "Газировка",                  "price": 300},
     "lemonade":       {"name": "Лимонад",                    "price": 350},
@@ -67,7 +74,7 @@ ITEMS: dict[str, dict[str, object]] = {
     "dream_ball":     {"name": "Дрим-болл",                  "price": 500},
     "beast_ball":     {"name": "Бист-болл",                  "price": 5000},
 
-    # ---- Апокорновые (Johto) ----
+    # ---- Апокорновые ----
     "level_ball":     {"name": "Левел-болл",                 "price": 250},
     "lure_ball":      {"name": "Люр-болл",                   "price": 250},
     "moon_ball":      {"name": "Мун-болл",                   "price": 250},
@@ -83,7 +90,7 @@ ITEMS: dict[str, dict[str, object]] = {
     "leaden_ball":    {"name": "Леден-болл",                 "price": 250},
     "gigaton_ball":   {"name": "Гигатон-болл",               "price": 500},
 
-    # ---- Исследовательские (прокачка) ----
+    # ---- Исследовательские ----
     "protein":        {"name": "Протеин",                    "price": 5000},
     "iron":           {"name": "Железо",                     "price": 5000},
     "calcium":        {"name": "Кальций",                    "price": 5000},
@@ -139,7 +146,7 @@ ITEMS: dict[str, dict[str, object]] = {
     # ---- Динамакс ----
     "dynamax_band":       {"name": "Динамакс-браслет",           "price": 100000},
 
-    # ---- Усиления (X-предметы) ----
+    # ---- Усиления ----
     "x_attack":       {"name": "X Атака",                    "price": 500},
     "x_defense":      {"name": "X Защита",                   "price": 500},
     "x_sp_atk":       {"name": "X Спец. Атака",              "price": 500},
@@ -170,7 +177,7 @@ ITEMS: dict[str, dict[str, object]] = {
     "expert_belt":    {"name": "Expert Belt",                "price": 8000},
     "rocky_helmet":   {"name": "Rocky Helmet",               "price": 7500},
 
-    # ---- Хибики: транспорт и скорость ----
+    # ---- Хибики ----
     "bicycle":        {"name": "Велосипед",                  "price": 15000},
     "acro_bike":      {"name": "Акро-велосипед",             "price": 25000},
     "mach_bike":      {"name": "Мах-велосипед",              "price": 25000},
@@ -178,7 +185,7 @@ ITEMS: dict[str, dict[str, object]] = {
     "quick_claw":     {"name": "Quick Claw",                 "price": 6000},
     "quick_powder":   {"name": "Quick Powder",               "price": 5000},
 
-    # ---- Люмьер: аксессуары ----
+    # ---- Люмьер ----
     "ribbon_pink":     {"name": "Розовая лента",             "price": 800},
     "ribbon_blue":     {"name": "Синяя лента",               "price": 800},
     "ribbon_gold":     {"name": "Золотая лента",             "price": 2500},
@@ -198,21 +205,17 @@ ITEMS: dict[str, dict[str, object]] = {
     "pendant_moon":    {"name": "Кулон-луна",                "price": 2200},
     "pendant_sun":     {"name": "Кулон-солнце",              "price": 2200},
 
-    # ---- Рейгард: испытательные предметы ----
+    # ---- Рейгард ----
     "weakness_policy":  {"name": "Weakness Policy",          "price": 9000},
     "protective_pads":  {"name": "Protective Pads",          "price": 8000},
     "loaded_dice":      {"name": "Loaded Dice",              "price": 7500},
     "covert_cloak":     {"name": "Covert Cloak",             "price": 8500},
     "clear_amulet":     {"name": "Clear Amulet",             "price": 8000},
     "booster_energy":   {"name": "Booster Energy",           "price": 12000},
-
-    # ---- Рейгард: подстройка покемонов ----
     "ability_capsule":  {"name": "Ability Capsule",          "price": 15000},
     "ability_patch":    {"name": "Ability Patch",            "price": 40000},
     "bottle_cap":       {"name": "Bottle Cap",               "price": 20000},
     "gold_bottle_cap":  {"name": "Gold Bottle Cap",          "price": 60000},
-
-    # ---- Рейгард: мятные листья ----
     "mint_adamant":     {"name": "Мятный лист: Адамант",     "price": 10000},
     "mint_jolly":       {"name": "Мятный лист: Джолли",      "price": 10000},
     "mint_modest":      {"name": "Мятный лист: Модест",      "price": 10000},
@@ -222,7 +225,7 @@ ITEMS: dict[str, dict[str, object]] = {
     "mint_impish":      {"name": "Мятный лист: Импиш",       "price": 10000},
     "mint_careful":     {"name": "Мятный лист: Кэафул",      "price": 10000},
 
-    # ---- Эйдолон: эксклюзивы Лиги ----
+    # ---- Эйдолон ----
     "league_badge":         {"name": "Значок Лиги",          "price": 25000},
     "champion_cape":        {"name": "Плащ чемпиона",        "price": 75000},
     "hall_of_fame_ticket":  {"name": "Билет в Зал славы",    "price": 150000},
@@ -521,6 +524,10 @@ def _location_by_channel(channel_id: int) -> str | None:
     return SHOP_CHANNELS.get(channel_id)
 
 
+# --------------------------------------------------------------------------- #
+#                        АВТОДОПОЛНЕНИЯ                                       #
+# --------------------------------------------------------------------------- #
+
 async def _shop_autocomplete(
     interaction: discord.Interaction, current: str
 ) -> list[app_commands.Choice[str]]:
@@ -544,9 +551,33 @@ async def _shop_autocomplete(
     return out
 
 
+async def _inventory_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[str]]:
+    """Показывает только предметы, которые есть в инвентаре активного профиля."""
+    trainer = await get_trainer(interaction.user.id)
+    inv: dict[str, int] = trainer.get("inventory", {}) or {}
+    cur = current.strip().lower()
+    out: list[app_commands.Choice[str]] = []
+    for key, qty in inv.items():
+        if qty <= 0:
+            continue
+        info = ITEMS.get(key)
+        if not info:
+            continue
+        label = f"{info['name']} × {qty}"
+        if not cur or cur in key or cur in str(info["name"]).lower():
+            out.append(app_commands.Choice(name=label[:100], value=key))
+        if len(out) >= 25:
+            break
+    return out
+
+
 class Inventory(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
+
+    # ------------------------------------------------------------------ /inventory
 
     @app_commands.command(name="inventory", description="Показать инвентарь")
     async def inventory(self, interaction: discord.Interaction) -> None:
@@ -566,6 +597,8 @@ class Inventory(commands.Cog):
             text=f"{t['name']} • Баланс: {t['pokebucks']:,} Pokébucks"
         )
         await interaction.response.send_message(embed=embed)
+
+    # ------------------------------------------------------------------ /shop
 
     @app_commands.command(
         name="shop",
@@ -642,6 +675,101 @@ class Inventory(commands.Cog):
             color=discord.Color.green(),
         )
         embed.set_footer(text=f"Остаток: {t_after['pokebucks']:,} Pokébucks")
+        await interaction.response.send_message(embed=embed)
+
+    # ------------------------------------------------------------------ /use
+
+    @app_commands.command(
+        name="use",
+        description="Использовать предмет (виден всем)",
+    )
+    @app_commands.describe(
+        item="Какой предмет использовать (из вашего инвентаря)",
+        profile_id="На какого персонажа (по умолчанию — на активного)",
+    )
+    @app_commands.autocomplete(item=_inventory_autocomplete)
+    async def use(
+        self,
+        interaction: discord.Interaction,
+        item: str,
+        profile_id: str | None = None,
+    ) -> None:
+        uid = interaction.user.id
+        key = item.strip().lower()
+
+        if key not in ITEMS:
+            await interaction.response.send_message(
+                "❌ Такого предмета нет в каталоге.", ephemeral=True
+            )
+            return
+
+        info = ITEMS[key]
+        name = info["name"]
+
+        # Списываем 1 предмет из инвентаря активного персонажа
+        taken = await take_item(uid, key, 1)
+        if not taken:
+            await interaction.response.send_message(
+                f"❌ У вас нет **{name}** в инвентаре.", ephemeral=True
+            )
+            return
+
+        embed = discord.Embed(
+            title="✨ Предмет использован",
+            description=(
+                f"**{interaction.user.display_name}** использовал **{name}**."
+            ),
+            color=discord.Color.green(),
+        )
+        # Видно всем — не ephemeral
+        await interaction.response.send_message(embed=embed)
+
+    # ------------------------------------------------------------------ /drop
+
+    @app_commands.command(
+        name="drop",
+        description="Выбросить предмет из инвентаря (виден всем)",
+    )
+    @app_commands.describe(
+        item="Какой предмет выбросить",
+        quantity="Сколько (по умолчанию 1)",
+    )
+    @app_commands.autocomplete(item=_inventory_autocomplete)
+    async def drop(
+        self,
+        interaction: discord.Interaction,
+        item: str,
+        quantity: app_commands.Range[int, 1, 999] = 1,
+    ) -> None:
+        uid = interaction.user.id
+        key = item.strip().lower()
+
+        if key not in ITEMS:
+            await interaction.response.send_message(
+                "❌ Такого предмета нет в каталоге.", ephemeral=True
+            )
+            return
+
+        info = ITEMS[key]
+        name = info["name"]
+
+        qty_have = await get_item_qty(uid, key)
+        if qty_have < quantity:
+            await interaction.response.send_message(
+                f"❌ У вас только **{qty_have}** шт. **{name}**.", ephemeral=True
+            )
+            return
+
+        await take_item(uid, key, quantity)
+
+        embed = discord.Embed(
+            title="🗑️ Предмет выброшен",
+            description=(
+                f"**{interaction.user.display_name}** выбросил "
+                f"**{name}** × {quantity}."
+            ),
+            color=discord.Color.dark_red(),
+        )
         await interaction.response.send_message(embed=embed)
 
 
