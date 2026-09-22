@@ -1,4 +1,4 @@
-"""Мастерские команды — выдача и редактирование покемонов, деньги, предметы, победы/поражения."""
+"""Мастерские команды — выдача и редактирование покемонов, деньги, предметы, победы/поражения, значки."""
 import logging
 import os
 import uuid
@@ -10,7 +10,9 @@ from discord.ext import commands
 
 import pokeapi_client
 from database import (
+    BADGE_TYPES,
     MAX_PARTY_SIZE,
+    add_badge_by_profile,
     add_item,
     add_item_by_profile,
     add_pokebucks,
@@ -31,13 +33,14 @@ from database import (
     inc_wins,
     inc_wins_by_profile,
     list_profiles,
+    remove_badge_by_profile,
     remove_pokemon,
     remove_pokemon_by_profile,
     update_pokemon,
     update_pokemon_by_profile,
 )
 from pokeapi_client import PokeAPIError
-from utils import EMBED_COLOR, format_moves, load_species, mon_title
+from utils import BADGE_EMOJI, BADGE_RU, EMBED_COLOR, format_moves, load_species, mon_title
 
 log = logging.getLogger(__name__)
 
@@ -45,6 +48,14 @@ GENDER_CHOICES = [
     app_commands.Choice(name="♂️ Самец", value="male"),
     app_commands.Choice(name="♀️ Самка", value="female"),
     app_commands.Choice(name="⚪ Бесполый", value="genderless"),
+]
+
+BADGE_CHOICES = [
+    app_commands.Choice(
+        name=f"{BADGE_EMOJI[b]} {BADGE_RU[b]}",
+        value=b,
+    )
+    for b in BADGE_TYPES
 ]
 
 
@@ -142,7 +153,6 @@ async def _profile_autocomplete(
 async def _instance_autocomplete(
     interaction: discord.Interaction, current: str
 ):
-    """ID покемонов выбранного игрока — с учётом profile_id, если он указан."""
     user: Optional[discord.Member] = interaction.namespace.user
     if user is None:
         return []
@@ -232,11 +242,11 @@ class Admin(commands.Cog):
         user="Кому выдать покемона",
         species="Вид: имя (пикачу / Pikachu) или номер (#25)",
         level="Уровень (1–100, по умолчанию 5)",
-        gender="Пол. Не укажете — определится случайно по виду.",
+        gender="Пол. Не укажете — определится случайно.",
         nickname="Кличка (необязательно)",
         moves="Атаки через запятую, 1–4",
-        ability="Способность. Не укажете — выберется случайная.",
-        profile_id="Конкретный персонаж (если нужно выдать не активному)",
+        ability="Способность. Не укажете — случайная.",
+        profile_id="Конкретный персонаж (если не активный)",
     )
     @app_commands.choices(gender=GENDER_CHOICES)
     @is_master()
@@ -260,10 +270,7 @@ class Admin(commands.Cog):
         try:
             data = await pokeapi_client.get_pokemon_by_name(species)
         except PokeAPIError as e:
-            await interaction.followup.send(
-                f"❌ {e}\nМожно вводить русское имя (Пикачу), английское (Pikachu) или номер (#25).",
-                ephemeral=True,
-            )
+            await interaction.followup.send(f"❌ {e}", ephemeral=True)
             return
 
         if gender is not None:
@@ -298,7 +305,7 @@ class Admin(commands.Cog):
             target_profile = await get_profile(profile_id.strip())
             if not target_profile or target_profile["user_id"] != user.id:
                 await interaction.followup.send(
-                    "❌ Профиль с таким ID не найден у указанного игрока.", ephemeral=True
+                    "❌ Профиль не найден у указанного игрока.", ephemeral=True
                 )
                 return
             target_profile_full = await get_profile_full(target_profile["profile_id"])
@@ -312,7 +319,7 @@ class Admin(commands.Cog):
 
         if profile_type == "pokemon":
             await interaction.followup.send(
-                f"❌ **{target_profile['name']}** — это покемон. Ему нельзя выдать покемона.",
+                f"❌ **{target_profile['name']}** — покемон. Ему нельзя выдать покемона.",
                 ephemeral=True,
             )
             return
@@ -411,8 +418,8 @@ class Admin(commands.Cog):
             profile_name = profile["name"]
         else:
             new_balance = await add_pokebucks(user.id, int(amount))
-            active = await get_profile_full((await get_trainer(user.id))["profile_id"])
-            profile_name = active["name"] if active else "—"
+            active = await get_trainer(user.id)
+            profile_name = active["name"]
 
         sign = "+" if amount >= 0 else ""
         embed = discord.Embed(
@@ -587,6 +594,149 @@ class Admin(commands.Cog):
             color=discord.Color.dark_red(),
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    # ------------------------------------------------------------------ /gm_badge_give
+
+    @app_commands.command(
+        name="gm_badge_give",
+        description="[Мастер] Выдать значок тренеру",
+    )
+    @app_commands.describe(
+        user="Кому выдать",
+        badge="Какой значок",
+        profile_id="Конкретный тренер (если не активный)",
+    )
+    @app_commands.choices(badge=BADGE_CHOICES)
+    @is_master()
+    @app_commands.autocomplete(profile_id=_profile_autocomplete)
+    async def gm_badge_give(
+        self,
+        interaction: discord.Interaction,
+        user: discord.Member,
+        badge: app_commands.Choice[str],
+        profile_id: Optional[str] = None,
+    ) -> None:
+        if profile_id:
+            profile = await get_profile(profile_id.strip())
+            if not profile or profile["user_id"] != user.id:
+                await interaction.response.send_message(
+                    "❌ Профиль не найден у игрока.", ephemeral=True
+                )
+                return
+            if profile["profile_type"] != "trainer":
+                await interaction.response.send_message(
+                    f"❌ **{profile['name']}** — покемон. Значки только для тренеров.",
+                    ephemeral=True,
+                )
+                return
+            target_pid = profile["profile_id"]
+            profile_name = profile["name"]
+        else:
+            active = await get_active_profile(user.id)
+            if not active:
+                await interaction.response.send_message(
+                    "❌ У игрока нет активного профиля.", ephemeral=True
+                )
+                return
+            if active["profile_type"] != "trainer":
+                await interaction.response.send_message(
+                    f"❌ Активный персонаж — покемон. Значки только для тренеров.",
+                    ephemeral=True,
+                )
+                return
+            target_pid = active["profile_id"]
+            profile_name = active["name"]
+
+        added = await add_badge_by_profile(target_pid, badge.value)
+        emoji = BADGE_EMOJI.get(badge.value, "🏅")
+        name = BADGE_RU.get(badge.value, badge.value)
+
+        if added:
+            embed = discord.Embed(
+                title="🎖️ Значок выдан",
+                description=(
+                    f"**Игрок:** {user.mention}\n"
+                    f"**Тренер:** {profile_name}\n"
+                    f"**Значок:** {emoji} {name}"
+                ),
+                color=discord.Color.gold(),
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+
+            try:
+                await user.send(
+                    f"🎖️ Мастер выдал вам значок: {emoji} **{name}** "
+                    f"(тренер **{profile_name}**)."
+                )
+            except discord.Forbidden:
+                pass
+        else:
+            await interaction.response.send_message(
+                f"⚠️ У тренера **{profile_name}** уже есть значок {emoji} **{name}** "
+                f"(или профиль не найден).",
+                ephemeral=True,
+            )
+
+    # ------------------------------------------------------------------ /gm_badge_take
+
+    @app_commands.command(
+        name="gm_badge_take",
+        description="[Мастер] Забрать значок у тренера",
+    )
+    @app_commands.describe(
+        user="У кого забрать",
+        badge="Какой значок",
+        profile_id="Конкретный тренер (если не активный)",
+    )
+    @app_commands.choices(badge=BADGE_CHOICES)
+    @is_master()
+    @app_commands.autocomplete(profile_id=_profile_autocomplete)
+    async def gm_badge_take(
+        self,
+        interaction: discord.Interaction,
+        user: discord.Member,
+        badge: app_commands.Choice[str],
+        profile_id: Optional[str] = None,
+    ) -> None:
+        if profile_id:
+            profile = await get_profile(profile_id.strip())
+            if not profile or profile["user_id"] != user.id:
+                await interaction.response.send_message(
+                    "❌ Профиль не найден у игрока.", ephemeral=True
+                )
+                return
+            target_pid = profile["profile_id"]
+            profile_name = profile["name"]
+        else:
+            active = await get_active_profile(user.id)
+            if not active:
+                await interaction.response.send_message(
+                    "❌ У игрока нет активного профиля.", ephemeral=True
+                )
+                return
+            target_pid = active["profile_id"]
+            profile_name = active["name"]
+
+        removed = await remove_badge_by_profile(target_pid, badge.value)
+        emoji = BADGE_EMOJI.get(badge.value, "🏅")
+        name = BADGE_RU.get(badge.value, badge.value)
+
+        if removed:
+            embed = discord.Embed(
+                title="🎖️ Значок забран",
+                description=(
+                    f"**Игрок:** {user.mention}\n"
+                    f"**Тренер:** {profile_name}\n"
+                    f"**Значок:** {emoji} {name}"
+                ),
+                color=discord.Color.dark_red(),
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+        else:
+            await interaction.response.send_message(
+                f"⚠️ У тренера **{profile_name}** нет значка {emoji} **{name}**.",
+                ephemeral=True,
+            )
 
     # ------------------------------------------------------------------ /gm_delete
 
