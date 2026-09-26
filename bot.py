@@ -27,6 +27,7 @@ EXTENSIONS = [
     "cogs.admin",
     "cogs.dice",
     "cogs.catch",
+    "cogs.spawn",
 ]
 
 
