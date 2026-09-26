@@ -19,12 +19,14 @@ CRIT_CHANCES = {
 # ==========================================================================
 #  ФОРМУЛА УКЛОНЕНИЯ ОТ СКОРОСТИ
 # ==========================================================================
-# База: 50%. Разница скоростей делится на SPEED_DIVISOR и даёт бонус в %.
-# Например при SPEED_DIVISOR = 4:
-#   Speed 100 vs 100 → 50%
-#   Speed 120 vs 100 → +5% → 55%
-#   Speed 150 vs 100 → +12% → 62%
-#   Speed 80  vs 100 → -5% → 45%
+# База: 10% при равной скорости.
+# Разница скоростей делится на SPEED_DIVISOR и даёт бонус в %.
+#   Speed 100 vs 100 → 10%
+#   Speed 120 vs 100 → +5%  → 15%
+#   Speed 150 vs 100 → +12% → 22%
+#   Speed 200 vs 100 → +25% → 35%
+#   Speed 300 vs 100 → +50% → 60%
+#   Speed  80 vs 100 → -5%  → 5% (обрезка)
 SPEED_DIVISOR = 4.0
 
 # Границы итогового шанса
@@ -48,13 +50,10 @@ def dodge_chance(
 
     - my_speed — скорость уклоняющегося
     - enemy_speed — скорость атакующего
-    - ch — дополнительный модификатор стадии (-6..+6), опционально
+    - ch — дополнительный модификатор (-6..+6). Каждая единица ±3%
     """
     diff = int(my_speed) - int(enemy_speed)
-    bonus = diff / SPEED_DIVISOR
-    base = 50.0 + bonus
-
-    # Модификатор стадии ch: каждая единица ±3%
+    base = 10.0 + diff / SPEED_DIVISOR
     base += ch * 3
 
     return max(DODGE_MIN, min(DODGE_MAX, base))
@@ -71,7 +70,7 @@ class Dice(commands.Cog):
     @app_commands.command(name="attack", description="Бросок атаки")
     @app_commands.describe(
         accuracy="Точность атаки в % (1–100). 0 — не промахивается",
-        ch="Модификатор точности/уклонения (-6..+6). По умолчанию 0",
+        ch="Модификатор точности (-6..+6). Каждая единица ±12.5%",
         cr="Стадия крита (0..+6). 0 — база 6%, +2 — 50%, +3 — 100%",
     )
     async def attack(
@@ -86,7 +85,6 @@ class Dice(commands.Cog):
         if move_accuracy is None:
             chance = 1.0
         else:
-            # ch сдвигает: +1 = +12.5% к базовой точности
             acc_mult = 1.0 + ch * 0.125
             chance = min(1.0, max(0.05, (move_accuracy / 100.0) * acc_mult))
 
@@ -121,7 +119,7 @@ class Dice(commands.Cog):
     @app_commands.describe(
         my_speed="Скорость уклоняющегося покемона (из PokéAPI)",
         enemy_speed="Скорость атакующего покемона",
-        ch="Доп. модификатор уклонения (-6..+6). Каждая единица ±3%",
+        ch="Доп. модификатор (-6..+6). Каждая единица ±3%",
     )
     async def dodge(
         self,
