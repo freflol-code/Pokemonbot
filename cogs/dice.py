@@ -5,8 +5,6 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-import battle_math
-
 
 CRIT_CHANCES = {
     0: 6.25,
@@ -18,6 +16,21 @@ CRIT_CHANCES = {
     6: 100.0,
 }
 
+# ==========================================================================
+#  ФОРМУЛА УКЛОНЕНИЯ ОТ СКОРОСТИ
+# ==========================================================================
+# База: 50%. Разница скоростей делится на SPEED_DIVISOR и даёт бонус в %.
+# Например при SPEED_DIVISOR = 4:
+#   Speed 100 vs 100 → 50%
+#   Speed 120 vs 100 → +5% → 55%
+#   Speed 150 vs 100 → +12% → 62%
+#   Speed 80  vs 100 → -5% → 45%
+SPEED_DIVISOR = 4.0
+
+# Границы итогового шанса
+DODGE_MIN = 5.0
+DODGE_MAX = 95.0
+
 
 def _roll_crit(cr_stage: int) -> bool:
     cr_stage = max(0, min(6, int(cr_stage)))
@@ -25,11 +38,35 @@ def _roll_crit(cr_stage: int) -> bool:
     return random.random() * 100 < chance
 
 
+def dodge_chance(
+    my_speed: int,
+    enemy_speed: int,
+    *,
+    ch: int = 0,
+) -> float:
+    """Итоговый шанс уворота (0–100).
+
+    - my_speed — скорость уклоняющегося
+    - enemy_speed — скорость атакующего
+    - ch — дополнительный модификатор стадии (-6..+6), опционально
+    """
+    diff = int(my_speed) - int(enemy_speed)
+    bonus = diff / SPEED_DIVISOR
+    base = 50.0 + bonus
+
+    # Модификатор стадии ch: каждая единица ±3%
+    base += ch * 3
+
+    return max(DODGE_MIN, min(DODGE_MAX, base))
+
+
 class Dice(commands.Cog):
     """Кубики для РП-боёв между игроками."""
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
+
+    # ------------------------------------------------------------------ /attack
 
     @app_commands.command(name="attack", description="Бросок атаки")
     @app_commands.describe(
@@ -46,11 +83,12 @@ class Dice(commands.Cog):
     ) -> None:
         move_accuracy = None if accuracy == 0 else accuracy
 
-        chance = battle_math.effective_accuracy(
-            move_accuracy,
-            accuracy_stage=ch,
-            evasion_stage=-ch,
-        )
+        if move_accuracy is None:
+            chance = 1.0
+        else:
+            # ch сдвигает: +1 = +12.5% к базовой точности
+            acc_mult = 1.0 + ch * 0.125
+            chance = min(1.0, max(0.05, (move_accuracy / 100.0) * acc_mult))
 
         roll = random.randint(1, 100)
         hit = roll <= round(chance * 100)
@@ -58,12 +96,6 @@ class Dice(commands.Cog):
         crit = hit and _roll_crit(cr)
 
         lines = [f"**{interaction.user.display_name}** атакует…", ""]
-
-        if move_accuracy is None:
-            lines.append("Атака не промахивается.")
-        else:
-            lines.append(f"Шанс: **{chance * 100:.0f}%**")
-        lines.append("")
 
         if not hit:
             lines.append("💨 **ПРОМАХ!**")
@@ -80,25 +112,30 @@ class Dice(commands.Cog):
         embed = discord.Embed(title="⚔️ Атака", description="\n".join(lines), color=color)
         await interaction.response.send_message(embed=embed)
 
-    @app_commands.command(name="dodge", description="Попытка уклониться")
+    # ------------------------------------------------------------------ /dodge
+
+    @app_commands.command(
+        name="dodge",
+        description="Уклонение (шанс зависит от разницы скоростей)",
+    )
     @app_commands.describe(
-        ch="Модификатор уклонения (-6..+6). По умолчанию 0",
+        my_speed="Скорость уклоняющегося покемона (из PokéAPI)",
+        enemy_speed="Скорость атакующего покемона",
+        ch="Доп. модификатор уклонения (-6..+6). Каждая единица ±3%",
     )
     async def dodge(
         self,
         interaction: discord.Interaction,
+        my_speed: app_commands.Range[int, 1, 999],
+        enemy_speed: app_commands.Range[int, 1, 999],
         ch: app_commands.Range[int, -6, 6] = 0,
     ) -> None:
-        base = 0.25
-        mult = battle_math.stage_multiplier(ch)
-        chance = min(0.95, max(0.05, base * mult))
+        chance = dodge_chance(my_speed, enemy_speed, ch=ch)
 
         roll = random.randint(1, 100)
-        success = roll <= round(chance * 100)
+        success = roll <= round(chance)
 
         lines = [f"**{interaction.user.display_name}** уклоняется…", ""]
-        lines.append(f"Шанс: **{chance * 100:.0f}%**")
-        lines.append("")
 
         if success:
             lines.append("✅ **УКЛОНИЛСЯ!**")
