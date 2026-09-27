@@ -129,27 +129,49 @@ async def _load_mon_data(mon: dict) -> Optional[dict]:
     }
 
 
-async def _load_moves(move_names: list[str]) -> list[dict]:
-    # Если среди имён есть не-ASCII (русские) — строим/грузим индекс один раз
-    if any(m and not m.isascii() for m in move_names[:4]):
-        try:
-            await pokeapi_client.ensure_move_index()
-        except Exception:
-            log.exception("Не удалось построить индекс русских имён атак")
+def _broken_move(name: str) -> dict:
+    """Заглушка для атаки, которую не удалось распознать."""
+    return {
+        "name": f"❓ {name}"[:80],
+        "raw_name": "struggle",
+        "power": 40,
+        "type": "normal",
+        "accuracy": 100,
+        "damage_class": "physical",
+        "broken": True,
+    }
 
+
+async def _load_moves(move_names: list[str]) -> list[dict]:
+    """Загружает атаки из PokéAPI.
+
+    Русские имена пробуем перевести через battle_data.MOVE_NAMES_RU
+    (и автоиндекс PokéAPI), ASCII-slug запрашиваем напрямую.
+    Если перевести не удалось — ставим кнопку-заглушку «❓ имя»,
+    чтобы игрок видел, что именно не распознано.
+    """
     out: list[dict] = []
     for name in move_names[:4]:
         if not name:
             continue
+
         resolved = pokeapi_client.resolve_move_name(name)
         raw = resolved.lower().replace(" ", "-").strip()
+
+        if not raw.isascii():
+            log.warning("Атака не распознана (осталось русской): %r", name)
+            out.append(_broken_move(name))
+            continue
+
         try:
             m = await pokeapi_client._fetch_json(
                 f"https://pokeapi.co/api/v2/move/{raw}"
             )
         except PokeAPIError:
-            log.warning("Атака не найдена: %r (→ %r)", name, raw)
+            log.warning("Атака не найдена в PokéAPI: %r (→ %r)", name, raw)
+            out.append(_broken_move(name))
             continue
+
         out.append({
             "name": raw.replace("-", " ").title(),
             "raw_name": raw,
@@ -159,15 +181,6 @@ async def _load_moves(move_names: list[str]) -> list[dict]:
             "damage_class": (m.get("damage_class") or {}).get("name", "physical"),
         })
     return out
-
-
-async def _fallback_moves(mon_data: dict, level: int) -> list[dict]:
-    """Если у покемона в БД нет атак — берём случайные из PokéAPI."""
-    all_moves: list[str] = mon_data.get("all_moves") or []
-    if not all_moves:
-        return []
-    picks = random.sample(all_moves, min(6, len(all_moves)))
-    return await _load_moves(picks)
 
 
 def _hp_bar(mon: BattlePokemon) -> str:
@@ -295,7 +308,9 @@ class SwitchView(discord.ui.View):
 class BattleMoveButton(discord.ui.Button):
     def __init__(self, battle: "Battle", owner: int, move: dict, idx: int):
         raw = move.get("raw_name", "")
-        if is_status_move(raw) or is_baton_pass_move(raw):
+        if move.get("broken"):
+            style = discord.ButtonStyle.danger
+        elif is_status_move(raw) or is_baton_pass_move(raw):
             style = discord.ButtonStyle.secondary
         elif is_pivot_move(raw):
             style = discord.ButtonStyle.success
@@ -313,6 +328,13 @@ class BattleMoveButton(discord.ui.Button):
     async def callback(self, interaction: discord.Interaction) -> None:
         if interaction.user.id != self.owner:
             await interaction.response.send_message("Это не ваш ход.", ephemeral=True)
+            return
+        if self.move.get("broken"):
+            await interaction.response.send_message(
+                "❌ Эта атака не распознана — обратитесь к мастеру, чтобы "
+                "он поправил название через `/gm_set_moves`.",
+                ephemeral=True,
+            )
             return
         await self.battle.register_action(
             interaction, self.owner,
@@ -438,9 +460,8 @@ class Battle:
         data = await _load_mon_data(mon)
         if not data:
             return False
+
         moves = await _load_moves(mon.get("moves", []))
-        if not moves:
-            moves = await _fallback_moves(data, mon.get("level", 5))
         if not moves:
             moves = [{
                 "name": "Struggle",
@@ -577,7 +598,7 @@ class Battle:
 
         raw_name = move.get("raw_name", move["name"].lower().replace(" ", "-"))
 
-        # --- Encore: принудительно используется заэнкоренная атака ---
+        # --- Encore ---
         encored = attacker.volatile.get("encore", 0)
         encored_move = getattr(attacker, "encored_move", None)
         if encored and encored_move:
@@ -645,7 +666,7 @@ class Battle:
         await self._resolve_attack(attacker, defender, move)
         attacker.last_move = raw_name
 
-        # --- Pivot (U-turn / Volt Switch / Flip Turn / Parting Shot) ---
+        # --- Pivot ---
         if is_pivot_move(raw_name):
             self.log_lines.append(
                 f"🔄 **{attacker.name}** собирается отступить после атаки!"
@@ -1350,7 +1371,6 @@ class Battle:
 
         await self.send_main_message()
 
-        # Принудительная смена после faint — ждём через _wait_for_switch
         fainted_uids = [
             uid for uid in self.players
             if self.current.get(uid) and self.current[uid].fainted
