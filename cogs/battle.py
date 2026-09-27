@@ -298,7 +298,7 @@ class SwitchSelect(discord.ui.Select):
 
 class SwitchView(discord.ui.View):
     def __init__(self, battle: "Battle", uid: int, reason: Optional[str] = None):
-        super().__init__(timeout=120)
+        super().__init__(timeout=180)
         self.add_item(SwitchSelect(battle, uid, reason))
 
 
@@ -1207,17 +1207,25 @@ class Battle:
         fut: asyncio.Future = loop.create_future()
         self.switch_futures[uid] = fut
 
+        reason_label = {
+            "baton": "Baton Pass",
+            "pivot": "после атаки",
+            "faint": "твой покемон выбыл",
+        }.get(reason, "смена")
+
         await self.channel.send(
-            f"🔄 <@{uid}>, выбери, кто выйдет следующим "
-            f"({'Baton Pass' if reason == 'baton' else 'после атаки'})..."
+            f"🔄 <@{uid}>, выбери, кто выйдет следующим ({reason_label})..."
         )
         await self.channel.send(view=SwitchView(self, uid, reason=reason))
         try:
-            await asyncio.wait_for(fut, timeout=120)
+            await asyncio.wait_for(fut, timeout=180)
         except asyncio.TimeoutError:
             self.log_lines.append(
                 f"⚠️ <@{uid}> не выбрал покемона вовремя — смена пропущена."
             )
+            self.pending_switch.pop(uid, None)
+        except Exception:
+            log.exception("Ошибка при ожидании смены покемона")
             self.pending_switch.pop(uid, None)
 
     async def _do_item(self, uid: int, item_key: str) -> None:
@@ -1343,6 +1351,7 @@ class Battle:
             self.log_lines.append(msg.pick(msg.WEATHER_END_LINES))
 
     async def _handle_faints(self) -> None:
+        # --- Сообщения о выбывании ---
         for uid in self.players:
             mon = self.current.get(uid)
             if mon and mon.fainted:
@@ -1356,6 +1365,7 @@ class Battle:
                         msg.pick(msg.FAINT_LINES).format(name=mon.name)
                     )
 
+        # --- Проверка, у кого ещё есть живые ---
         alive: dict[int, bool] = {}
         for uid in self.players:
             alive[uid] = any(hp > 0 for hp in self.party_hp[uid].values())
@@ -1369,22 +1379,29 @@ class Battle:
                 await self._end_battle(None, None)
             return
 
+        # --- Показываем состояние боя после хода ---
         await self.send_main_message()
 
+        # --- Принудительная смена после faint ---
         fainted_uids = [
             uid for uid in self.players
             if self.current.get(uid) and self.current[uid].fainted
         ]
-        for uid in fainted_uids:
-            if uid not in self.pending_switch:
-                other = self._other_player(uid)
-                await self.channel.send(
-                    f"<@{other}>, ждём, пока соперник выберет покемона…"
-                )
-                await self._wait_for_switch(uid, reason="faint")
 
-        if not fainted_uids:
-            await self.send_move_views()
+        if fainted_uids:
+            for uid in fainted_uids:
+                if uid not in self.pending_switch:
+                    other = self._other_player(uid)
+                    await self.channel.send(
+                        f"<@{other}>, ждём, пока соперник выберет покемона…"
+                    )
+                    await self._wait_for_switch(uid, reason="faint")
+
+            # После всех смен — обновляем состояние и показываем новые кнопки
+            await self.send_main_message()
+
+        # --- Ход следующего раунда ---
+        await self.send_move_views()
 
     # ------------------------------------------------------------------ #
     #  UI / ЛОГ
