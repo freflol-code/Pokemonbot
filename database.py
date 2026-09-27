@@ -790,3 +790,54 @@ async def reset_trainer(user_id: int) -> None:
             "WHERE profile_id = $1",
             pid,
         )
+
+
+# --------------------------------------------------------------------------- #
+#                        МАССОВЫЕ ОПЕРАЦИИ (мастер)                            #
+# --------------------------------------------------------------------------- #
+
+async def list_all_pokemon_with_moves() -> list[dict[str, Any]]:
+    """Все покемоны во всех профилях — для массового фикса атак."""
+    pool = _pool_conn()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT instance_id, profile_id, species_id, nickname, level, "
+            "gender, moves, ability FROM pokemon"
+        )
+    result: list[dict[str, Any]] = []
+    for r in rows:
+        try:
+            moves = json.loads(r["moves"]) if r["moves"] else []
+            if not isinstance(moves, list):
+                moves = []
+        except (json.JSONDecodeError, TypeError):
+            moves = []
+        result.append({
+            "instance_id": r["instance_id"],
+            "profile_id": r["profile_id"],
+            "species_id": r["species_id"],
+            "nickname": r["nickname"],
+            "level": r["level"],
+            "gender": r["gender"],
+            "moves": moves,
+            "ability": r["ability"],
+        })
+    return result
+
+
+async def update_pokemon_moves_batch(fixes: dict[str, list[str]]) -> int:
+    """fixes: {instance_id: new_moves_list}. Возвращает число обновлённых записей."""
+    if not fixes:
+        return 0
+    pool = _pool_conn()
+    updated = 0
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            for iid, moves in fixes.items():
+                result = await conn.execute(
+                    "UPDATE pokemon SET moves = $1 WHERE instance_id = $2",
+                    json.dumps(moves, ensure_ascii=False), iid,
+                )
+                if result.endswith("1"):
+                    updated += 1
+    return updated
