@@ -1,5 +1,5 @@
 """Справочники боевой системы: типы, стадии, характеры, погода, статусы,
-приоритеты, способности, pivot-атаки, крит-стадии."""
+приоритеты, способности, pivot-атаки, крит-стадии, словарь RU→EN атак."""
 from __future__ import annotations
 
 
@@ -149,7 +149,6 @@ STATUS_EMOJI = {
     "flash_fire": "🔥",
 }
 
-# Бонусы к поимке
 STATUS_BONUS_CATCH = {
     "sleep": 2.5,
     "freeze": 2.5,
@@ -228,9 +227,7 @@ WEATHER_DURATION_EXTENDED = 8
 #  ПРИОРИТЕТЫ АТАК
 # ==========================================================================
 MOVE_PRIORITY: dict[str, int] = {
-    # +5
     "helping-hand": 5,
-    # +4
     "detect": 4,
     "protect": 4,
     "spiky-shield": 4,
@@ -242,15 +239,12 @@ MOVE_PRIORITY: dict[str, int] = {
     "quick-guard": 4,
     "magic-coat": 4,
     "snatch": 4,
-    # +3
     "follow-me": 3,
     "rage-powder": 3,
     "crafty-shield": 3,
-    # +2
     "fake-out": 2,
     "extreme-speed": 2,
     "feint": 2,
-    # +1
     "accelerock": 1,
     "aqua-jet": 1,
     "bullet-punch": 1,
@@ -262,7 +256,6 @@ MOVE_PRIORITY: dict[str, int] = {
     "sucker-punch": 1,
     "vacuum-wave": 1,
     "water-shuriken": 1,
-    # -1 .. -7
     "avalanche": -4,
     "beak-blast": -3,
     "counter": -5,
@@ -369,12 +362,10 @@ def get_status_move(raw_name: str) -> dict | None:
 
 
 # ==========================================================================
-#  ПЕРЕХОДЯЩИЕ И PIVOT-АТАКИ
+#  PIVOT / BATON PASS
 # ==========================================================================
-# Baton Pass — переносит стадии статов и волатильные статусы следующему покемону
 BATON_PASS_MOVES: set[str] = {"baton-pass"}
 
-# Pivot-атаки: наносят урон и затем форсируют смену (не переносят стадии)
 PIVOT_MOVES: set[str] = {
     "u-turn", "volt-switch", "flip-turn",
     "parting-shot", "teleport",
@@ -390,7 +381,7 @@ def is_pivot_move(raw_name: str) -> bool:
 
 
 # ==========================================================================
-#  КРИТИЧЕСКИЕ АТАКИ (HIGH CRIT RATIO)
+#  КРИТИЧЕСКИЕ АТАКИ
 # ==========================================================================
 HIGH_CRIT_MOVES: set[str] = {
     "slash", "night-slash", "cross-chop", "stone-edge", "leaf-blade",
@@ -398,20 +389,17 @@ HIGH_CRIT_MOVES: set[str] = {
     "razor-leaf", "sky-attack", "air-cutter", "attack-order", "blaze-kick",
     "cross-poison", "drill-run", "spacial-rend", "snipe-shot", "aeroblast",
     "sacred-fire", "origin-pulse", "precipice-blades", "dragon-claw",
-    "leaf-blade", "poison-tail", "shadow-blast", "sunny-day-snipe",
-    "wicked-blow", "flowertrick", "espathra", "mighty-cleave",
+    "poison-tail", "shadow-blast", "wicked-blow", "mighty-cleave",
 }
 
 
 def get_crit_stage(raw_name: str, extra: int = 0) -> int:
-    """Возвращает стадию крита с учётом high-crit атак и бонусов предметов/способностей."""
     stage = extra
     if raw_name.lower().replace(" ", "-").strip() in HIGH_CRIT_MOVES:
         stage += 1
     return max(0, min(4, stage))
 
 
-# Шансы крита по стадиям (Gen VI+)
 CRIT_CHANCES: dict[int, float] = {
     0: 1 / 24,
     1: 1 / 8,
@@ -424,10 +412,6 @@ CRIT_CHANCES: dict[int, float] = {
 # ==========================================================================
 #  СПОСОБНОСТИ: ИММУНИТЕТЫ К ТИПАМ
 # ==========================================================================
-# Формат: ability → (тип, эффект)
-#   effect = "immune"  — полный иммунитет
-#   effect = "heal"    — иммунитет + лечение 1/4 макс HP
-#   effect = "boost"   — иммунитет + повышение стата (см. ABILITY_IMMUNITY_BOOST)
 ABILITY_TYPE_IMMUNITY: dict[str, tuple[str, str]] = {
     "levitate":        ("ground", "immune"),
     "volt-absorb":     ("electric", "heal"),
@@ -444,7 +428,6 @@ ABILITY_TYPE_IMMUNITY: dict[str, tuple[str, str]] = {
     "thermal-exchange": ("fire", "boost"),
 }
 
-# Какой стат поднимается при "boost"-иммунитете
 ABILITY_IMMUNITY_BOOST: dict[str, str] = {
     "flash-fire":      "sp_attack",
     "sap-sipper":      "attack",
@@ -456,71 +439,57 @@ ABILITY_IMMUNITY_BOOST: dict[str, str] = {
     "thermal-exchange": "attack",
 }
 
-# Какой стат поднимается (persisting) — для flash-fire, чтобы он усиливал огонь
 ABILITY_PERSISTING_BOOST: dict[str, str] = {
-    "flash-fire": "flash_fire",  # сохраняется до конца боя, усиливает Fire-атаки
+    "flash-fire": "flash_fire",
 }
 
 
 # ==========================================================================
 #  СПОСОБНОСТИ: МОДИФИКАТОРЫ УРОНА
 # ==========================================================================
-# Множители атаки (применяются к attacker.stats["attack"] / sp_attack)
 ABILITY_ATTACK_MULT: dict[str, float] = {
     "huge-power": 2.0,
     "pure-power": 2.0,
-    "guts":       1.5,   # если есть статус
+    "guts":       1.5,
     "hustle":     1.5,
-    "toxic-boost": 1.5,  # если badly_poison
-    "flare-boost": 1.5,  # если burn
+    "toxic-boost": 1.5,
+    "flare-boost": 1.5,
 }
 
-# Множители защиты
 ABILITY_DEFENSE_MULT: dict[str, float] = {
-    "marvel-scale": 1.5,  # если есть статус
-    "grass-pelt":   1.5,  # в sun — упрощённо всегда
+    "marvel-scale": 1.5,
+    "grass-pelt":   1.5,
     "fur-coat":     2.0,
 }
 
-# Множители урона (применяются к финальному dmg)
 ABILITY_DAMAGE_TAKEN_MULT: dict[str, dict[str, float]] = {
-    # ability → {тип_атаки: множитель}
     "thick-fat":   {"fire": 0.5, "ice": 0.5},
     "heatproof":   {"fire": 0.5},
     "water-bubble": {"fire": 0.5},
     "purifying-salt": {"ghost": 0.5},
-    "fluffy":      {"fire": 2.0},   # контактный урон — не отслеживаем, только fire
-    "ice-scales":  {"special": 0.5},  # особый — упрощение
+    "fluffy":      {"fire": 2.0},
+    "ice-scales":  {"special": 0.5},
 }
 
-# Универсальные модификаторы исходящего урона
 ABILITY_OUTGOING_MULT: dict[str, float] = {
-    "adaptability": 1.0,   # STAB 2.0 вместо 1.5 — обрабатывается отдельно
-    "tinted-lens":  2.0,   # если множитель < 1
-    "filter":       0.75,  # если множитель > 1 (применяется к входящему)
+    "adaptability": 1.0,
+    "tinted-lens":  2.0,
+    "filter":       0.75,
     "solid-rock":   0.75,
     "prism-armor":  0.75,
-    "technician":   1.5,   # если power <= 60
-    "sheer-force":  1.3,   # если у атаки есть вторичный эффект — упрощённо 1.0
+    "technician":   1.5,
+    "sheer-force":  1.3,
 }
 
 
 # ==========================================================================
 #  СПОСОБНОСТИ: ОСОБЫЕ ЭФФЕКТЫ
 # ==========================================================================
-# Способности, дающие устойчивость к 1 HP на полном HP
 STURDY_ABILITIES = {"sturdy"}
-
-# Способности, уменьшающие урон вдвое при полном HP
 HALVE_AT_FULL_HP = {"multiscale", "shadow-shield"}
-
-# Способности, дающие иммунитет к непрямому урону (погода, ожог, яд, leech seed)
 INDIRECT_DAMAGE_IMMUNE = {"magic-guard"}
-
-# Способности, дающие иммунитет к погоде (sand/snow)
 WEATHER_IMMUNE = {"overcoat", "sand-veil", "sand-rush", "snow-cloak", "ice-body"}
 
-# Способности, лечащие в конце хода (в зависимости от погоды)
 END_OF_TURN_ABILITIES: dict[str, dict] = {
     "rain-dish":    {"weather": "rain",  "fraction": 16},
     "ice-body":     {"weather": "snow",  "fraction": 16},
@@ -528,21 +497,17 @@ END_OF_TURN_ABILITIES: dict[str, dict] = {
     "solar-power":  {"hurt_weather": "sunny", "fraction": 8, "boost": "sp_attack"},
 }
 
-# Способности, повышающие стат каждый ход
 END_TURN_BOOST_ABILITIES: dict[str, str] = {
     "speed-boost": "speed",
-    "moody": "random",  # упрощённо — случайный стат
+    "moody": "random",
 }
 
-# Способности, лечащие при смене
 SWITCH_HEAL_ABILITIES: dict[str, float] = {
-    "regenerator": 1 / 3,  # лечит 1/3 HP при смене
+    "regenerator": 1 / 3,
 }
 
-# Способности, снимающие статус при смене
 SWITCH_CURE_ABILITIES = {"natural-cure"}
 
-# Wonderguard — иммунитет ко всему, кроме суперэффективного
 WONDER_GUARD = "wonder-guard"
 
 
@@ -550,12 +515,10 @@ WONDER_GUARD = "wonder-guard"
 #  ХЕЛПЕРЫ ДЛЯ СПОСОБНОСТЕЙ
 # ==========================================================================
 def get_type_immunity(ability: str) -> tuple[str, str] | None:
-    """Возвращает (тип, эффект) или None."""
     return ABILITY_TYPE_IMMUNITY.get((ability or "").lower())
 
 
 def get_attack_mult(ability: str, has_status: bool, status: str) -> float:
-    """Множитель атаки от способности."""
     ab = (ability or "").lower()
     if ab not in ABILITY_ATTACK_MULT:
         return 1.0
@@ -587,3 +550,268 @@ def get_damage_taken_mult(ability: str, move_type: str, damage_class: str) -> fl
     if damage_class in row:
         return row[damage_class]
     return 1.0
+
+
+# ==========================================================================
+#  РУЧНОЙ СЛОВАРЬ РУССКИХ ИМЁН АТАК (фан-перевод → PokéAPI slug)
+# ==========================================================================
+MOVE_NAMES_RU: dict[str, str] = {
+    # --- базовые нормальные ---
+    "царапина": "scratch",
+    "захват": "tackle",
+    "удар": "pound",
+    "хвост-хлыст": "tail-whip",
+    "рычание": "growl",
+    "быстрая атака": "quick-attack",
+    "стремительная атака": "quick-attack",
+    "пощёчина": "double-slap",
+    "двойная атака": "double-hit",
+    "слэм": "slam",
+    "раздавить": "slam",
+    "тело-броском": "body-slam",
+    "бодислэм": "body-slam",
+    "гипер-луч": "hyper-beam",
+    "сверхлуч": "hyper-beam",
+    "взрыв": "explosion",
+    "самоуничтожение": "self-destruct",
+    "сдача": "submission",
+    "удар-сверху": "skull-bash",
+    "обманка": "feint",
+    "приманка": "swagger",
+    "самоуверенность": "swagger",
+    "хвастовство": "swagger",
+    "мудрость": "calm-mind",
+    "концентрация": "calm-mind",
+    "скорлупа-броня": "iron-defense",
+
+    # --- огонь ---
+    "огонёк": "ember",
+    "искра-огня": "ember",
+    "огненный-шар": "fire-blast",
+    "огненный вихрь": "fire-spin",
+    "пламя": "flamethrower",
+    "огнемёт": "flamethrower",
+    "огнемет": "flamethrower",
+    "солнечный луч": "solar-beam",
+    "солнечный-удар": "sunny-day",
+    "вихрь-огня": "fire-spin",
+    "инферно": "inferno",
+    "огненный-клык": "fire-fang",
+    "укус-огня": "fire-fang",
+
+    # --- вода ---
+    "водный пистолет": "water-gun",
+    "водяной-пистолет": "water-gun",
+    "гидро-насос": "hydro-pump",
+    "гидронасос": "hydro-pump",
+    "прибой": "surf",
+    "сёрф": "surf",
+    "водопад": "waterfall",
+    "аква-джет": "aqua-jet",
+    "водные-лезвия": "razor-shell",
+    "водяной-шар": "water-pulse",
+    "водный-импульс": "water-pulse",
+    "пузырь": "bubble",
+    "пузыри": "bubble-beam",
+    "пузырьковый луч": "bubble-beam",
+
+    # --- электричество ---
+    "разряд": "thunder-shock",
+    "удар-током": "thunder-shock",
+    "громовая-волна": "thunder-wave",
+    "электрошок": "thunder-shock",
+    "гром": "thunder",
+    "молния": "thunderbolt",
+    "громовой-удар": "thunder-punch",
+    "громовой-клык": "thunder-fang",
+    "электро-шар": "electro-ball",
+    "вольт-переключение": "volt-switch",
+    "вольт-свитч": "volt-switch",
+
+    # --- трава ---
+    "поглощение": "absorb",
+    "мега-поглощение": "mega-drain",
+    "гига-поглощение": "giga-drain",
+    "лист-лезвие": "leaf-blade",
+    "лезвие-листа": "leaf-blade",
+    "листовой-шторм": "leaf-storm",
+    "семена-лечения": "leech-seed",
+    "высасывание": "leech-seed",
+    "усыпляющий-порошок": "sleep-powder",
+    "спор": "spore",
+    "яд-порошок": "poison-powder",
+    "лунный свет": "moonlight",
+    "синтез": "synthesis",
+    "солнечный свет": "synthesis",
+
+    # --- лёд ---
+    "ледяной-удар": "ice-punch",
+    "лёд-луч": "ice-beam",
+    "ледяной-луч": "ice-beam",
+    "метель": "blizzard",
+    "вьюга": "blizzard",
+    "лёд-клык": "ice-fang",
+    "ледяной-клык": "ice-fang",
+    "лёд-осколок": "ice-shard",
+    "снег": "snowscape",
+
+    # --- боевой ---
+    "удар-кулаком": "karate-chop",
+    "каратэ-чоп": "karate-chop",
+    "низкий-пинок": "low-kick",
+    "ближний-бой": "close-combat",
+    "высокий-пинок": "high-jump-kick",
+    "мега-удар": "mega-punch",
+    "динамический-удар": "dynamic-punch",
+    "сверх-удар": "superpower",
+
+    # --- яд ---
+    "кислота": "acid",
+    "кислотный-распылитель": "acid-spray",
+    "токсичный": "toxic",
+    "яд": "poison-sting",
+    "укус-яда": "poison-fang",
+    "грязный-удар": "sludge",
+
+    # --- земля ---
+    "землетрясение": "earthquake",
+    "удар-земли": "earth-power",
+    "магнитуда": "magnitude",
+    "грязевой-выстрел": "mud-shot",
+    "грязь-бомба": "mud-bomb",
+
+    # --- летающие ---
+    "воздушный ас": "aerial-ace",
+    "воздушный-ас": "aerial-ace",
+    "крыло-атака": "wing-attack",
+    "клюв-атака": "peck",
+    "полёт": "fly",
+    "ураган": "hurricane",
+    "вихрь-ветра": "gust",
+    "порыв-ветра": "gust",
+    "воздушный-резец": "air-cutter",
+
+    # --- психические ---
+    "психический": "psychic",
+    "пси-луч": "psybeam",
+    "психический удар": "psycho-cut",
+    "гипноз": "hypnosis",
+    "медитация": "meditate",
+    "ясновидение": "future-sight",
+    "замешательство": "confusion",
+    "конфузия": "confusion",
+    "конфуз-луч": "confuse-ray",
+    "лунный свет-пси": "moonblast",
+
+    # --- жук ---
+    "укус-жука": "bug-bite",
+    "жало-атака": "pin-missile",
+    "кси-удар": "x-scissor",
+    "первый-удар": "first-impression",
+    "лёгкое-жало": "fury-cutter",
+
+    # --- камень ---
+    "каменный-удар": "rock-throw",
+    "каменная-бомба": "rock-blast",
+    "камнепад": "rock-slide",
+    "обвал": "rock-slide",
+    "каменное-лезвие": "stone-edge",
+    "мощный-камень": "power-gem",
+    "старый-камень": "ancient-power",
+
+    # --- призрак ---
+    "теневой-шар": "shadow-ball",
+    "тень-удар": "shadow-punch",
+    "тень-когти": "shadow-claw",
+    "пожиратель-душ": "soul-eater",
+    "проклятие": "curse",
+    "ликс": "lick",
+    "облизывание": "lick",
+
+    # --- дракон ---
+    "дракон-ярость": "dragon-rage",
+    "драконий-клык": "dragon-claw",
+    "драконий-когти": "dragon-claw",
+    "драконий-пульс": "dragon-pulse",
+    "дракон-вздох": "dragon-breath",
+    "драконий-танец": "dragon-dance",
+    "дракон-метеор": "draco-meteor",
+    "дракон-нырок": "dragon-dive",
+    "драконий-шар": "dragon-pulse",
+
+    # --- тёмный ---
+    "тёмный-удар": "dark-pulse",
+    "тёмный-импульс": "dark-pulse",
+    "кусание": "bite",
+    "укус-тьмы": "crunch",
+    "хруст": "crunch",
+    "преследование": "pursuit",
+    "обман": "feint-attack",
+    "подлый-удар": "sucker-punch",
+
+    # --- сталь ---
+    "металлические когти": "metal-claw",
+    "металлический коготь": "metal-claw",
+    "железная голова": "iron-head",
+    "железный натиск": "iron-head",
+    "железная броня": "iron-defense",
+    "железная защита": "iron-defense",
+    "металлический шум": "metal-sound",
+    "пушечный-шар": "flash-cannon",
+    "вспышка-пушки": "flash-cannon",
+    "железный-хвост": "iron-tail",
+    "стальной-крыло": "steel-wing",
+
+    # --- фея ---
+    "очарование": "charm",
+    "детский-голосок": "disarming-voice",
+    "лунная-пушка": "moonblast",
+    "фея-ветер": "fairy-wind",
+    "милый-поцелуй": "sweet-kiss",
+    "обезоруживающий голос": "disarming-voice",
+    "магический огонь": "magical-flame",
+
+    # --- статусные / вспомогательные ---
+    "меч-танец": "swords-dance",
+    "танец-мечей": "swords-dance",
+    "двойная-команда": "double-team",
+    "раздвоение": "double-team",
+    "ускорение": "agility",
+    "ловкость": "agility",
+    "укрепление": "harden",
+    "защита": "defense-curl",
+    "спокойствие": "calm-mind",
+    "медитация-ума": "calm-mind",
+    "отдых": "rest",
+    "восстановление": "recover",
+    "лечение": "recover",
+    "заживление": "heal-bell",
+    "колокол-лечения": "heal-bell",
+    "защитный-барьер": "protect",
+    "защита-барьер": "protect",
+    "отражение": "reflect",
+    "световой-экран": "light-screen",
+    "попутный-ветер": "tailwind",
+    "обманка-экрана": "substitute",
+    "заменитель": "substitute",
+    "насмешка": "taunt",
+    "приказ-повтор": "encore",
+    "запрет": "disable",
+    "фокус-внимание": "focus-energy",
+    "двойная-защита": "double-team",
+    "увеличение-силы": "swords-dance",
+    "каменная-броня": "iron-defense",
+}
+
+
+def resolve_move_ru(name: str) -> str | None:
+    """Ищет английский slug для русского имени атаки. None если не найден."""
+    if not name:
+        return None
+    key = name.strip().lower().replace("_", " ").replace("-", " ")
+    key = " ".join(key.split())
+    for cand in (key, key.replace(" ", "-")):
+        v = MOVE_NAMES_RU.get(cand)
+        if v:
+            return v
+    return None
