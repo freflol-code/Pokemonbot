@@ -1,4 +1,4 @@
-"""Справочники для боевой системы: типы, эффективности, стадии, характеры, погода."""
+"""Справочники боевой системы: типы, стадии, характеры, погода, статусные атаки, приоритеты."""
 from __future__ import annotations
 
 
@@ -134,13 +134,15 @@ STATUS_EMOJI = {
     "none": "",
     "burn": "🟥",
     "poison": "🟪",
+    "badly_poison": "🟪",
     "paralysis": "🟨",
     "sleep": "💤",
     "freeze": "❄️",
     "confused": "🌀",
-    "badly_poison": "🟪",
+    "infatuated": "💗",
 }
 
+# Летальные статусы (не могут быть вылечены Antidote и т.п.)
 STATUS_BONUS_CATCH = {
     "sleep": 2.5,
     "freeze": 2.5,
@@ -163,7 +165,6 @@ WEATHER_LABEL: dict[str, str] = {
     "fog":        "🌫️ Туман",
 }
 
-# Множители урона по типу атаки
 WEATHER_DAMAGE_MULT: dict[str, dict[str, float]] = {
     "sunny":     {"fire": 1.5, "water": 0.5},
     "rain":      {"water": 1.5, "fire": 0.5},
@@ -173,7 +174,6 @@ WEATHER_DAMAGE_MULT: dict[str, dict[str, float]] = {
     "none":      {},
 }
 
-# Множители точности
 WEATHER_ACCURACY_MULT: dict[str, dict[str, float]] = {
     "sunny":     {},
     "rain":      {"thunder": 1.0, "hurricane": 1.0},
@@ -183,13 +183,11 @@ WEATHER_ACCURACY_MULT: dict[str, dict[str, float]] = {
     "none":      {},
 }
 
-# Урон в конце хода по типу покемона
 WEATHER_TICK_DAMAGE: dict[str, dict] = {
     "sandstorm": {"immune_types": ["rock", "ground", "steel"], "fraction": 16},
     "snow":      {"immune_types": ["ice"], "fraction": 16},
 }
 
-# Погодные атаки → какая погода
 WEATHER_MOVES: dict[str, str] = {
     "rain-dance":  "rain",
     "sunny-day":   "sunny",
@@ -199,7 +197,6 @@ WEATHER_MOVES: dict[str, str] = {
     "chilly-reception": "snow",
 }
 
-# Способности → какая погода
 WEATHER_ABILITIES: dict[str, str] = {
     "drizzle":      "rain",
     "drought":      "sunny",
@@ -208,7 +205,6 @@ WEATHER_ABILITIES: dict[str, str] = {
     "sand-spit":    "sandstorm",
 }
 
-# Погодные камни → продлевают погоду
 WEATHER_ROCKS = {
     "damp-rock":    "rain",
     "heat-rock":    "sunny",
@@ -218,3 +214,147 @@ WEATHER_ROCKS = {
 
 WEATHER_DURATION_DEFAULT = 5
 WEATHER_DURATION_EXTENDED = 8
+
+
+# ==========================================================================
+#  ПРИОРИТЕТЫ АТАК
+#  Ключ: raw_name из PokéAPI → приоритет (число). Больше = раньше.
+# ==========================================================================
+MOVE_PRIORITY: dict[str, int] = {
+    # +5
+    "helping-hand": 5,
+    # +4
+    "detect": 4,
+    "protect": 4,
+    "spiky-shield": 4,
+    "baneful-bunker": 4,
+    "kings-shield": 4,
+    "obstruct": 4,
+    "endure": 4,
+    "wide-guard": 4,
+    "quick-guard": 4,
+    "magic-coat": 4,
+    "snatch": 4,
+    # +3
+    "follow-me": 3,
+    "rage-powder": 3,
+    "crafty-shield": 3,
+    # +2
+    "fake-out": 2,
+    "quick-guard": 2,
+    "extreme-speed": 2,
+    "feint": 2,
+    # +1
+    "accelerock": 1,
+    "aqua-jet": 1,
+    "bullet-punch": 1,
+    "ice-shard": 1,
+    "jet-punch": 1,
+    "mach-punch": 1,
+    "quick-attack": 1,
+    "shadow-sneak": 1,
+    "sucker-punch": 1,
+    "vacuum-wave": 1,
+    "water-shuriken": 1,
+    # -1 .. -7 (пониженный приоритет)
+    "avalanche": -4,
+    "beak-blast": -3,
+    "counter": -5,
+    "dragon-tail": -6,
+    "focus-punch": -3,
+    "mirror-coat": -5,
+    "roar": -6,
+    "shell-trap": -3,
+    "whirlwind": -6,
+    "circle-throw": -6,
+    "dragon-tail": -6,
+    "vital-throw": -1,
+    "trick-room": -7,
+}
+
+
+def get_move_priority(raw_name: str) -> int:
+    low = raw_name.lower().replace(" ", "-").strip()
+    return MOVE_PRIORITY.get(low, 0)
+
+
+# ==========================================================================
+#  СТАТУСНЫЕ АТАКИ (STATUS MOVES)
+#  Формат: raw_name → { category, target, status, stat, stages, chance }
+#  - category: "inflict" | "boost" | "debuff" | "heal"
+#  - target: "self" | "opponent"
+#  - status: burn/poison/paralysis/sleep/freeze/confused/infatuated
+#  - stat: attack/defense/sp_attack/sp_defense/speed/accuracy/evasion
+#  - stages: +N или -N
+#  - chance: 0..1 (для атак с шансом)
+# ==========================================================================
+STATUS_MOVES: dict[str, dict] = {
+    # -------------------- Наложение статусов --------------------
+    "will-o-wisp":   {"category": "inflict", "target": "opponent", "status": "burn",      "accuracy": 85},
+    "toxic":         {"category": "inflict", "target": "opponent", "status": "poison",    "accuracy": 90},
+    "poison-powder": {"category": "inflict", "target": "opponent", "status": "poison",    "accuracy": 75},
+    "thunder-wave":  {"category": "inflict", "target": "opponent", "status": "paralysis", "accuracy": 90},
+    "glare":         {"category": "inflict", "target": "opponent", "status": "paralysis", "accuracy": 100},
+    "sleep-powder":  {"category": "inflict", "target": "opponent", "status": "sleep",     "accuracy": 75},
+    "spore":         {"category": "inflict", "target": "opponent", "status": "sleep",     "accuracy": 100},
+    "hypnosis":      {"category": "inflict", "target": "opponent", "status": "sleep",     "accuracy": 60},
+    "sing":          {"category": "inflict", "target": "opponent", "status": "sleep",     "accuracy": 55},
+    "confuse-ray":   {"category": "inflict", "target": "opponent", "status": "confused",  "accuracy": 100},
+    "supersonic":    {"category": "inflict", "target": "opponent", "status": "confused",  "accuracy": 55},
+    "sweet-kiss":    {"category": "inflict", "target": "opponent", "status": "confused",  "accuracy": 75},
+    "teeter-dance":  {"category": "inflict", "target": "opponent", "status": "confused",  "accuracy": 100},
+    "attract":       {"category": "inflict", "target": "opponent", "status": "infatuated","accuracy": 100},
+
+    # -------------------- Повышение статов (self) --------------------
+    "swords-dance":  {"category": "boost", "target": "self", "stat": "attack",     "stages": 2, "accuracy": None},
+    "dragon-dance":  {"category": "boost", "target": "self", "stat": "attack",     "stages": 1, "accuracy": None},
+    "howl":          {"category": "boost", "target": "self", "stat": "attack",     "stages": 1, "accuracy": None},
+    "bulk-up":       {"category": "boost", "target": "self", "stat": "attack",     "stages": 1, "accuracy": None},
+    "iron-defense":  {"category": "boost", "target": "self", "stat": "defense",    "stages": 2, "accuracy": None},
+    "acid-armor":    {"category": "boost", "target": "self", "stat": "defense",    "stages": 2, "accuracy": None},
+    "withdraw":      {"category": "boost", "target": "self", "stat": "defense",    "stages": 1, "accuracy": None},
+    "harden":        {"category": "boost", "target": "self", "stat": "defense",    "stages": 1, "accuracy": None},
+    "nasty-plot":    {"category": "boost", "target": "self", "stat": "sp_attack",  "stages": 2, "accuracy": None},
+    "calm-mind":     {"category": "boost", "target": "self", "stat": "sp_attack",  "stages": 1, "accuracy": None},
+    "growth":        {"category": "boost", "target": "self", "stat": "attack",     "stages": 1, "accuracy": None},
+    "amnesia":       {"category": "boost", "target": "self", "stat": "sp_defense", "stages": 2, "accuracy": None},
+    "agility":       {"category": "boost", "target": "self", "stat": "speed",      "stages": 2, "accuracy": None},
+    "rock-polish":   {"category": "boost", "target": "self", "stat": "speed",      "stages": 2, "accuracy": None},
+    "double-team":   {"category": "boost", "target": "self", "stat": "evasion",    "stages": 1, "accuracy": None},
+    "minimize":      {"category": "boost", "target": "self", "stat": "evasion",    "stages": 2, "accuracy": None},
+
+    # -------------------- Понижение статов (opponent) --------------------
+    "growl":         {"category": "debuff", "target": "opponent", "stat": "attack",     "stages": -1, "accuracy": 100},
+    "leer":          {"category": "debuff", "target": "opponent", "stat": "defense",    "stages": -1, "accuracy": 100},
+    "tail-whip":     {"category": "debuff", "target": "opponent", "stat": "defense",    "stages": -1, "accuracy": 100},
+    "screech":       {"category": "debuff", "target": "opponent", "stat": "defense",    "stages": -2, "accuracy": 85},
+    "scary-face":    {"category": "debuff", "target": "opponent", "stat": "speed",      "stages": -2, "accuracy": 100},
+    "cotton-spore":  {"category": "debuff", "target": "opponent", "stat": "speed",      "stages": -2, "accuracy": 100},
+    "charm":         {"category": "debuff", "target": "opponent", "stat": "attack",     "stages": -2, "accuracy": 100},
+    "string-shot":   {"category": "debuff", "target": "opponent", "stat": "speed",      "stages": -2, "accuracy": 95},
+    "flash":         {"category": "debuff", "target": "opponent", "stat": "accuracy",   "stages": -1, "accuracy": 100},
+    "sand-attack":   {"category": "debuff", "target": "opponent", "stat": "accuracy",   "stages": -1, "accuracy": 100},
+    "smokescreen":   {"category": "debuff", "target": "opponent", "stat": "accuracy",   "stages": -1, "accuracy": 100},
+
+    # -------------------- Лечение --------------------
+    "recover":       {"category": "heal", "target": "self", "fraction": 2,   "accuracy": None},
+    "soft-boiled":   {"category": "heal", "target": "self", "fraction": 2,   "accuracy": None},
+    "roost":         {"category": "heal", "target": "self", "fraction": 2,   "accuracy": None},
+    "slack-off":     {"category": "heal", "target": "self", "fraction": 2,   "accuracy": None},
+    "synthesis":     {"category": "heal", "target": "self", "fraction": 2,   "accuracy": None},
+    "moonlight":     {"category": "heal", "target": "self", "fraction": 2,   "accuracy": None},
+    "morning-sun":   {"category": "heal", "target": "self", "fraction": 2,   "accuracy": None},
+    "rest":          {"category": "heal", "target": "self", "fraction": 1,   "accuracy": None,
+                      "self_status": "sleep", "sleep_turns": 2},
+    "wish":          {"category": "heal", "target": "self", "fraction": 2,   "accuracy": None},
+    "heal-bell":     {"category": "heal", "target": "self", "cure_team": True, "accuracy": None},
+    "aromatherapy":  {"category": "heal", "target": "self", "cure_team": True, "accuracy": None},
+}
+
+
+def is_status_move(raw_name: str) -> bool:
+    return raw_name.lower().replace(" ", "-").strip() in STATUS_MOVES
+
+
+def get_status_move(raw_name: str) -> dict | None:
+    return STATUS_MOVES.get(raw_name.lower().replace(" ", "-").strip())
