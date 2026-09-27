@@ -1,10 +1,9 @@
-"""Справочники для боевой системы: типы, эффективности, стадии, характеры."""
+"""Справочники для боевой системы: типы, эффективности, стадии, характеры, погода."""
 from __future__ import annotations
 
 
 # ==========================================================================
 #  ТИПЫ И ЭФФЕКТИВНОСТЬ
-#  0 — обычный урон, 2 — суперэффективно, 0.5 — неэффективно, 0 — иммунитет
 # ==========================================================================
 TYPE_CHART: dict[str, dict[str, float]] = {
     "normal":   {"rock": 0.5, "ghost": 0, "steel": 0.5},
@@ -47,7 +46,6 @@ TYPE_CHART: dict[str, dict[str, float]] = {
 
 
 def get_type_multiplier(attack_type: str, defender_types: list[str]) -> float:
-    """Итоговый множитель по типам защиты (перемножаем)."""
     mult = 1.0
     row = TYPE_CHART.get(attack_type, {})
     for d in defender_types:
@@ -85,8 +83,7 @@ def stage_mult(stage: int) -> float:
 
 
 # ==========================================================================
-#  ХАРАКТЕРЫ (Natures)
-#  (повышаемый стат, понижаемый стат) или (None, None) для нейтральных
+#  ХАРАКТЕРЫ
 # ==========================================================================
 NATURES: dict[str, tuple[str | None, str | None]] = {
     "hardy":   (None, None),
@@ -118,7 +115,6 @@ NATURES: dict[str, tuple[str | None, str | None]] = {
 
 
 def nature_multiplier(nature: str | None) -> dict[str, float]:
-    """Возвращает множители для характеристик по характеру."""
     base = {"attack": 1.0, "defense": 1.0, "sp_attack": 1.0,
             "sp_defense": 1.0, "speed": 1.0}
     if not nature:
@@ -136,13 +132,13 @@ def nature_multiplier(nature: str | None) -> dict[str, float]:
 # ==========================================================================
 STATUS_EMOJI = {
     "none": "",
-    "burn": "🟥",       # ожог
-    "poison": "🟪",     # отравление
-    "paralysis": "🟨",  # паралич
-    "sleep": "💤",      # сон
-    "freeze": "❄️",     # заморозка
-    "confused": "🌀",   # замешательство
-    "badly_poison": "🟪",  # сильное отравление
+    "burn": "🟥",
+    "poison": "🟪",
+    "paralysis": "🟨",
+    "sleep": "💤",
+    "freeze": "❄️",
+    "confused": "🌀",
+    "badly_poison": "🟪",
 }
 
 STATUS_BONUS_CATCH = {
@@ -153,3 +149,72 @@ STATUS_BONUS_CATCH = {
     "poison": 1.5,
     "none": 1.0,
 }
+
+
+# ==========================================================================
+#  ПОГОДА
+# ==========================================================================
+WEATHER_LABEL: dict[str, str] = {
+    "none":       "— Ясно",
+    "sunny":      "☀️ Солнце",
+    "rain":       "🌧️ Дождь",
+    "sandstorm":  "🏜️ Песчаная буря",
+    "snow":       "❄️ Снег",
+    "fog":        "🌫️ Туман",
+}
+
+# Множители урона по типу атаки
+WEATHER_DAMAGE_MULT: dict[str, dict[str, float]] = {
+    "sunny":     {"fire": 1.5, "water": 0.5},
+    "rain":      {"water": 1.5, "fire": 0.5},
+    "sandstorm": {},
+    "snow":      {"ice": 1.5},
+    "fog":       {},
+    "none":      {},
+}
+
+# Множители точности
+WEATHER_ACCURACY_MULT: dict[str, dict[str, float]] = {
+    "sunny":     {},
+    "rain":      {"thunder": 1.0, "hurricane": 1.0},
+    "sandstorm": {},
+    "snow":      {"blizzard": 1.0},
+    "fog":       {},
+    "none":      {},
+}
+
+# Урон в конце хода по типу покемона
+WEATHER_TICK_DAMAGE: dict[str, dict] = {
+    "sandstorm": {"immune_types": ["rock", "ground", "steel"], "fraction": 16},
+    "snow":      {"immune_types": ["ice"], "fraction": 16},
+}
+
+# Погодные атаки → какая погода
+WEATHER_MOVES: dict[str, str] = {
+    "rain-dance":  "rain",
+    "sunny-day":   "sunny",
+    "sandstorm":   "sandstorm",
+    "snowscape":   "snow",
+    "hail":        "snow",
+    "chilly-reception": "snow",
+}
+
+# Способности → какая погода
+WEATHER_ABILITIES: dict[str, str] = {
+    "drizzle":      "rain",
+    "drought":      "sunny",
+    "sand-stream":  "sandstorm",
+    "snow-warning": "snow",
+    "sand-spit":    "sandstorm",
+}
+
+# Погодные камни → продлевают погоду
+WEATHER_ROCKS = {
+    "damp-rock":    "rain",
+    "heat-rock":    "sunny",
+    "smooth-rock":  "sandstorm",
+    "icy-rock":     "snow",
+}
+
+WEATHER_DURATION_DEFAULT = 5
+WEATHER_DURATION_EXTENDED = 8
