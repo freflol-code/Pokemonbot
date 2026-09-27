@@ -1,5 +1,4 @@
-"""Боевая система: /battle @юзер + кнопки."""
-import asyncio
+"""Боевая система: /battle @юзер + кнопки, смена и замена покемонов."""
 import logging
 import random
 from typing import Optional
@@ -10,11 +9,7 @@ from discord.ext import commands
 
 import battle_messages as msg
 import pokeapi_client
-from battle_data import (
-    STATUS_EMOJI,
-    damage_label,
-    get_type_multiplier,
-)
+from battle_data import STATUS_EMOJI, damage_label
 from battle_engine import (
     BattlePokemon,
     SideField,
@@ -23,14 +18,13 @@ from battle_engine import (
     calc_damage,
     crit_check,
 )
-from database import get_active_profile, get_trainer
+from database import get_active_profile, get_trainer, inc_losses, inc_wins
 from pokeapi_client import PokeAPIError
 
 log = logging.getLogger(__name__)
 
 
 async def _load_mon_data(mon: dict) -> Optional[dict]:
-    """Догружает данные покемона из PokéAPI + способности/спрайт."""
     try:
         data = await pokeapi_client.get_pokemon(mon["species_id"])
     except PokeAPIError:
@@ -75,19 +69,68 @@ async def _load_moves(move_names: list[str]) -> list[dict]:
     return out
 
 
-class BattleView(discord.ui.View):
-    """Кнопки атак для конкретного игрока."""
+def _hp_bar(mon: "BattlePokemon") -> str:
+    ratio = mon.hp / mon.max_hp if mon.max_hp else 0
+    filled = int(round(ratio * 10))
+    return f"`{'█' * filled}{'░' * (10 - filled)}`"
 
-    def __init__(self, battle: "Battle", owner: int):
-        super().__init__(timeout=180)
+
+# ==========================================================================
+#                          ВЫБОР ПОКЕМОНА ДЛЯ СМЕНЫ
+# ==========================================================================
+class SwitchSelect(discord.ui.Select):
+    def __init__(self, battle: "Battle", uid: int):
         self.battle = battle
-        self.owner = owner
+        self.uid = uid
+        options: list[discord.SelectOption] = []
+        party = battle.parties[uid]
+        current_id = battle.active_index[uid]
+        for i, mon in enumerate(party):
+            if i == current_id:
+                continue
+            bp = battle.party_hp[uid].get(i, 0)
+            if bp <= 0:
+                continue
+            name = mon.get("nickname") or f"#{mon.get('species_id')}"
+            options.append(
+                discord.SelectOption(
+                    label=f"{name} • {bp} HP"[:100],
+                    value=str(i),
+                )
+            )
+            if len(options) >= 25:
+                break
 
-        attacker = battle.current[owner]
-        for i, move in enumerate(attacker.moves[:4]):
-            self.add_item(BattleMoveButton(battle, owner, move, i))
+        if not options:
+            options.append(
+                discord.SelectOption(label="Нет доступных покемонов", value="-1")
+            )
+
+        super().__init__(placeholder="Выбери покемона…", options=options)
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.uid:
+            await interaction.response.send_message("Это не ваш выбор.", ephemeral=True)
+            return
+        if self.values[0] == "-1":
+            await interaction.response.send_message(
+                "Нет живых покемонов для смены.", ephemeral=True
+            )
+            return
+
+        idx = int(self.values[0])
+        await self.battle.switch_pokemon(interaction, self.uid, idx)
 
 
+class SwitchView(discord.ui.View):
+    def __init__(self, battle: "Battle", uid: int):
+        super().__init__(timeout=60)
+        self.add_item(SwitchSelect(battle, uid))
+
+
+# ==========================================================================
+#                          ВЫБОР АТАКИ
+# ==========================================================================
 class BattleMoveButton(discord.ui.Button):
     def __init__(self, battle: "Battle", owner: int, move: dict, idx: int):
         super().__init__(
@@ -101,13 +144,44 @@ class BattleMoveButton(discord.ui.Button):
 
     async def callback(self, interaction: discord.Interaction) -> None:
         if interaction.user.id != self.owner:
-            await interaction.response.send_message(
-                "Это не ваш ход.", ephemeral=True
-            )
+            await interaction.response.send_message("Это не ваш ход.", ephemeral=True)
             return
         await self.battle.submit_move(interaction, self.owner, self.move)
 
 
+class BattleView(discord.ui.View):
+    def __init__(self, battle: "Battle", owner: int):
+        super().__init__(timeout=180)
+        self.battle = battle
+        self.owner = owner
+
+        attacker = battle.current[owner]
+        for i, move in enumerate(attacker.moves[:4]):
+            self.add_item(BattleMoveButton(battle, owner, move, i))
+
+        # Кнопка смены покемона
+        switch_btn = discord.ui.Button(
+            label="Сменить покемона",
+            style=discord.ButtonStyle.secondary,
+            emoji="🔄",
+            row=2,
+        )
+        switch_btn.callback = self._on_switch
+        self.add_item(switch_btn)
+
+    async def _on_switch(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.owner:
+            await interaction.response.send_message("Это не ваш ход.", ephemeral=True)
+            return
+        view = SwitchView(self.battle, self.owner)
+        await interaction.response.send_message(
+            "Кого выпустить?", view=view, ephemeral=True
+        )
+
+
+# ==========================================================================
+#                            САМ БОЙ
+# ==========================================================================
 class Battle:
     def __init__(self, channel: discord.TextChannel, p1: int, p2: int):
         self.channel = channel
@@ -116,11 +190,10 @@ class Battle:
         self.current: dict[int, BattlePokemon] = {}
         self.parties: dict[int, list[dict]] = {}
         self.active_index: dict[int, int] = {p1: 0, p2: 0}
+        self.party_hp: dict[int, dict[int, int]] = {p1: {}, p2: {}}
         self.messages: list[discord.Message] = []
         self.log_lines: list[str] = []
         self.views: dict[int, BattleView] = {}
-        self.ready_views = False
-        self.turn_winner: Optional[int] = None
         self.finished = False
 
     # ------------------------------------------------------------------ #
@@ -128,22 +201,21 @@ class Battle:
         for uid in self.players:
             t = await get_trainer(uid)
             if not t["party"]:
-                await self.channel.send(
-                    f"❌ <@{uid}> — нет покемонов в команде."
-                )
+                await self.channel.send(f"❌ <@{uid}> — нет покемонов в команде.")
                 return False
             self.parties[uid] = list(t["party"])
 
         for uid in self.players:
-            mon = self.parties[uid][0]
-            data = await _load_mon_data(mon)
-            moves = await _load_moves(mon.get("moves", []))
-            if not data:
+            ok = await self._load_active(uid, 0)
+            if not ok:
                 await self.channel.send(f"❌ Не удалось загрузить покемона у <@{uid}>.")
                 return False
-            self.current[uid] = BattlePokemon(
-                data, mon.get("level", 5), moves, nature=mon.get("nature", "hardy")
-            )
+            # Инициализируем HP всех покемонов партии
+            for i, mon in enumerate(self.parties[uid]):
+                if i in self.party_hp[uid]:
+                    continue
+                hp = self._calc_max_hp(mon)
+                self.party_hp[uid][i] = hp
 
         await self.channel.send(
             f"⚔️ **Бой начался!** <@{self.players[0]}> против <@{self.players[1]}>"
@@ -151,6 +223,39 @@ class Battle:
         await self.send_main_message()
         await self.send_move_views()
         return True
+
+    # ------------------------------------------------------------------ #
+    def _calc_max_hp(self, mon: dict) -> int:
+        """Грубая оценка max HP для неактивных покемонов."""
+        return 100
+
+    async def _load_active(self, uid: int, idx: int) -> bool:
+        """Загружает покемона по индексу как активного."""
+        party = self.parties[uid]
+        if idx < 0 or idx >= len(party):
+            return False
+        mon = party[idx]
+        data = await _load_mon_data(mon)
+        moves = await _load_moves(mon.get("moves", []))
+        if not data:
+            return False
+
+        bp = BattlePokemon(
+            data, mon.get("level", 5), moves, nature=mon.get("nature", "hardy")
+        )
+        # Сохраняем текущее HP из партии, если есть
+        saved_hp = self.party_hp.get(uid, {}).get(idx)
+        if saved_hp is not None and saved_hp > 0:
+            bp.hp = min(saved_hp, bp.max_hp)
+        self.current[uid] = bp
+        self.active_index[uid] = idx
+        self.party_hp.setdefault(uid, {})[idx] = bp.hp
+        return True
+
+    def _save_active_hp(self, uid: int) -> None:
+        idx = self.active_index[uid]
+        if uid in self.current:
+            self.party_hp[uid][idx] = self.current[uid].hp
 
     # ------------------------------------------------------------------ #
     async def send_main_message(self) -> None:
@@ -163,7 +268,7 @@ class Battle:
             name=f"👤 <@{p1}>",
             value=(
                 f"**{m1.name}** • Ур. {m1.level}\n"
-                f"HP: {m1.hp}/{m1.max_hp} {self.hp_bar(m1)}"
+                f"HP: {m1.hp}/{m1.max_hp} {_hp_bar(m1)}"
                 f"{STATUS_EMOJI.get(m1.status, '')}\n"
                 f"Способность: `{m1.ability or '—'}`\n"
                 f"Поле: {' '.join(self.fields[p1].summary()) or '—'}"
@@ -174,7 +279,7 @@ class Battle:
             name=f"👤 <@{p2}>",
             value=(
                 f"**{m2.name}** • Ур. {m2.level}\n"
-                f"HP: {m2.hp}/{m2.max_hp} {self.hp_bar(m2)}"
+                f"HP: {m2.hp}/{m2.max_hp} {_hp_bar(m2)}"
                 f"{STATUS_EMOJI.get(m2.status, '')}\n"
                 f"Способность: `{m2.ability or '—'}`\n"
                 f"Поле: {' '.join(self.fields[p2].summary()) or '—'}"
@@ -193,7 +298,6 @@ class Battle:
         m = await self.channel.send(embed=embed)
         self.messages.append(m)
 
-    # ------------------------------------------------------------------ #
     async def send_move_views(self) -> None:
         for uid in self.players:
             attacker = self.current[uid]
@@ -203,18 +307,18 @@ class Battle:
                 description=f"**{attacker.name}** — выбери атаку:",
                 color=0x457B9D,
             )
-            m = await self.channel.send(
-                content=f"<@{uid}>", embed=embed, view=view
-            )
+            m = await self.channel.send(content=f"<@{uid}>", embed=embed, view=view)
             self.views[uid] = view
             self.messages.append(m)
 
     # ------------------------------------------------------------------ #
-    @staticmethod
-    def hp_bar(mon: BattlePokemon) -> str:
-        ratio = mon.hp / mon.max_hp if mon.max_hp else 0
-        filled = int(round(ratio * 10))
-        return f"`{'█' * filled}{'░' * (10 - filled)}`"
+    async def _cleanup_views(self) -> None:
+        for m in self.views.values():
+            try:
+                await m.edit(view=None)
+            except discord.HTTPException:
+                pass
+        self.views.clear()
 
     # ------------------------------------------------------------------ #
     async def submit_move(
@@ -224,36 +328,23 @@ class Battle:
             await interaction.response.send_message("Бой уже завершён.", ephemeral=True)
             return
 
+        await interaction.response.defer()
+        await self._cleanup_views()
+
         attacker = self.current[uid]
         opponent_id = self.players[0] if uid == self.players[1] else self.players[1]
         defender = self.current[opponent_id]
 
-        # Проверка статусов
-        skip_line = None
-        if attacker.status == "sleep":
-            attacker.status_counter -= 1
-            if attacker.status_counter <= 0:
-                attacker.status = "none"
-                skip_line = msg.pick(msg.WAKE_UP).format(name=attacker.name)
-            else:
-                skip_line = msg.pick(msg.SLEEP_SKIP).format(name=attacker.name)
-        elif attacker.status == "freeze":
-            if random.random() < 0.2:
-                attacker.status = "none"
-                skip_line = msg.pick(msg.THAW).format(name=attacker.name)
-            else:
-                skip_line = msg.pick(msg.FROZEN_SKIP).format(name=attacker.name)
-        elif attacker.status == "paralysis" and random.random() < 0.25:
-            skip_line = msg.pick(msg.PARALYSIS_SKIP).format(name=attacker.name)
-
         self.log_lines = []
 
+        # Проверка статусов
+        skip_line = self._status_precheck(attacker)
         if skip_line:
             self.log_lines.append(skip_line)
         else:
             await self._resolve_attack(attacker, defender, move)
 
-        # End-of-turn
+        # End-of-turn для обоих
         for mon in (attacker, defender):
             tick = apply_end_of_turn(mon)
             if tick:
@@ -265,28 +356,31 @@ class Battle:
                     self.log_lines.append(
                         f"🟪 **{mon.name}** страдает от яда (−{tick['dmg']} HP)."
                     )
-            if mon.fainted:
-                self.log_lines.append(msg.pick(msg.FAINT_LINES).format(name=mon.name))
 
+        self._save_active_hp(uid)
+        self._save_active_hp(opponent_id)
         self.fields[uid].tick()
         self.fields[opponent_id].tick()
 
-        # Проверка конца боя
-        if defender.fainted or attacker.fainted:
-            await self.end_battle(interaction, loser_id=opponent_id if defender.fainted else uid)
-            return
+        # Проверка faint
+        await self._handle_faints()
 
-        # Отвечаем в лог
-        for m in self.views.values():
-            try:
-                await m.edit(view=None)
-            except discord.HTTPException:
-                pass
-        self.views.clear()
-
-        await interaction.response.defer()
-        await self.send_main_message()
-        await self.send_move_views()
+    # ------------------------------------------------------------------ #
+    def _status_precheck(self, attacker: BattlePokemon) -> Optional[str]:
+        if attacker.status == "sleep":
+            attacker.status_counter -= 1
+            if attacker.status_counter <= 0:
+                attacker.status = "none"
+                return msg.pick(msg.WAKE_UP).format(name=attacker.name)
+            return msg.pick(msg.SLEEP_SKIP).format(name=attacker.name)
+        if attacker.status == "freeze":
+            if random.random() < 0.2:
+                attacker.status = "none"
+                return msg.pick(msg.THAW).format(name=attacker.name)
+            return msg.pick(msg.FROZEN_SKIP).format(name=attacker.name)
+        if attacker.status == "paralysis" and random.random() < 0.25:
+            return msg.pick(msg.PARALYSIS_SKIP).format(name=attacker.name)
+        return None
 
     # ------------------------------------------------------------------ #
     async def _resolve_attack(
@@ -343,40 +437,154 @@ class Battle:
         return self.players[1] if me == self.players[0] else self.players[0]
 
     # ------------------------------------------------------------------ #
-    async def end_battle(self, interaction: discord.Interaction, loser_id: int) -> None:
-        self.finished = True
-        winner_id = self.players[0] if loser_id == self.players[1] else self.players[1]
+    async def switch_pokemon(
+        self, interaction: discord.Interaction, uid: int, new_idx: int
+    ) -> None:
+        """Смена покемона — тратит ход."""
+        if self.finished:
+            await interaction.response.send_message("Бой уже завершён.", ephemeral=True)
+            return
 
-        embed = discord.Embed(
-            title="🏁 Бой завершён!",
-            description=(
-                f"🏆 Победитель: <@{winner_id}>\n"
-                f"💔 Проигравший: <@{loser_id}>"
-            ),
-            color=0x2A9D8F,
-        )
+        await interaction.response.defer()
+        await self._cleanup_views()
+
+        old = self.current.get(uid)
+        self._save_active_hp(uid)
+
+        if not await self._load_active(uid, new_idx):
+            await self.channel.send(f"❌ Не удалось сменить покемона у <@{uid}>.")
+            return
+
+        new = self.current[uid]
+        self.log_lines = [
+            msg.pick(msg.SWITCH_LINES).format(who=f"<@{uid}>", next_mon=new.name)
+        ]
+
+        # Противник атакует по тому, кто вышел
+        opponent_id = self.players[0] if uid == self.players[1] else self.players[1]
+        defender = self.current[opponent_id]
+
+        # Ход переходит противнику — он атакует нового покемона
+        if opponent_id not in self.current:
+            await self.send_main_message()
+            await self.send_move_views()
+            return
+
+        await self.send_main_message()
+        await self.send_move_views()
+
+    # ------------------------------------------------------------------ #
+    async def _handle_faints(self) -> None:
+        """Проверяет, кто выбыл, и предлагает замену или завершает бой."""
+        for uid in self.players:
+            mon = self.current.get(uid)
+            if mon and mon.fainted:
+                self._save_active_hp(uid)
+                self.log_lines.append(
+                    msg.pick(msg.FAINT_LINES).format(name=mon.name)
+                )
+
+        # Проверяем, остались ли живые у каждого игрока
+        alive_status: dict[int, bool] = {}
+        for uid in self.players:
+            alive = any(hp > 0 for hp in self.party_hp[uid].values())
+            alive_status[uid] = alive
+
+        # Если у обоих есть живые — предлагаем замену тем, у кого активный мёртв
+        if all(alive_status.values()):
+            await self.send_main_message()
+
+            someone_switching = False
+            for uid in self.players:
+                mon = self.current.get(uid)
+                if mon and mon.fainted:
+                    someone_switching = True
+                    view = SwitchView(self, uid)
+                    await self.channel.send(
+                        f"<@{uid}>, твой покемон выбыл. Выбери следующего:",
+                        view=view,
+                    )
+
+            if not someone_switching:
+                await self.send_move_views()
+            return
+
+        # У кого-то нет живых — конец боя
+        losers = [uid for uid, alive in alive_status.items() if not alive]
+        winners = [uid for uid, alive in alive_status.items() if alive]
+
+        if losers and winners:
+            await self._end_battle(winners[0], losers[0])
+        else:
+            # Оба без живых — ничья
+            await self._end_battle(None, None)
+
+    # ------------------------------------------------------------------ #
+    async def _end_battle(self, winner_id: Optional[int], loser_id: Optional[int]) -> None:
+        self.finished = True
+        await self._cleanup_views()
+
+        if winner_id and loser_id:
+            embed = discord.Embed(
+                title="🏁 Бой завершён!",
+                description=(
+                    f"🏆 Победитель: <@{winner_id}>\n"
+                    f"💔 Проигравший: <@{loser_id}>"
+                ),
+                color=0x2A9D8F,
+            )
+            await inc_wins(winner_id)
+            await inc_losses(loser_id)
+        else:
+            embed = discord.Embed(
+                title="🏁 Ничья!",
+                description="Оба тренера потеряли всех покемонов.",
+                color=0x2A9D8F,
+            )
         await self.channel.send(embed=embed)
 
-        # Обновляем БД: победы/поражения
-        from database import inc_losses, inc_wins
-        await inc_wins(winner_id)
-        await inc_losses(loser_id)
 
-        try:
-            await interaction.response.defer()
-        except discord.HTTPException:
-            pass
+# ==========================================================================
+#                          ПРИГЛАШЕНИЕ НА БОЙ
+# ==========================================================================
+class InviteView(discord.ui.View):
+    def __init__(self, host: int, target: int, cog: "BattleCog"):
+        super().__init__(timeout=60)
+        self.host = host
+        self.target = target
+        self.cog = cog
+
+    @discord.ui.button(label="Принять", style=discord.ButtonStyle.success)
+    async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.target:
+            await interaction.response.send_message("Это не ваш вызов.", ephemeral=True)
+            return
+        for c in self.children:
+            c.disabled = True
+        await interaction.response.edit_message(view=self)
+
+        battle = Battle(interaction.channel, self.host, self.target)
+        self.cog.active_battles[interaction.channel_id] = battle
+        if not await battle.start():
+            self.cog.active_battles.pop(interaction.channel_id, None)
+
+    @discord.ui.button(label="Отклонить", style=discord.ButtonStyle.danger)
+    async def reject(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.target:
+            await interaction.response.send_message("Это не ваш вызов.", ephemeral=True)
+            return
+        for c in self.children:
+            c.disabled = True
+        await interaction.response.edit_message(view=self)
+        await interaction.followup.send(f"❌ <@{self.target}> отклонил вызов.")
 
 
-class Battle(commands.Cog):
+class BattleCog(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
         self.active_battles: dict[int, Battle] = {}
 
-    @app_commands.command(
-        name="battle",
-        description="Вызвать игрока на бой",
-    )
+    @app_commands.command(name="battle", description="Вызвать игрока на бой")
     @app_commands.describe(user="Кого вызвать на бой")
     async def battle(
         self, interaction: discord.Interaction, user: discord.Member
@@ -422,39 +630,5 @@ class Battle(commands.Cog):
         await interaction.response.send_message(embed=embed, view=view)
 
 
-class InviteView(discord.ui.View):
-    def __init__(self, host: int, target: int, cog: Battle):
-        super().__init__(timeout=60)
-        self.host = host
-        self.target = target
-        self.cog = cog
-
-    @discord.ui.button(label="Принять", style=discord.ButtonStyle.success)
-    async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.target:
-            await interaction.response.send_message("Это не ваш вызов.", ephemeral=True)
-            return
-        for c in self.children:
-            c.disabled = True
-        await interaction.response.edit_message(view=self)
-
-        battle = Battle(interaction.channel, self.host, self.target)
-        self.cog.active_battles[interaction.channel_id] = battle
-        if not await battle.start():
-            self.cog.active_battles.pop(interaction.channel_id, None)
-
-    @discord.ui.button(label="Отклонить", style=discord.ButtonStyle.danger)
-    async def reject(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.target:
-            await interaction.response.send_message("Это не ваш вызов.", ephemeral=True)
-            return
-        for c in self.children:
-            c.disabled = True
-        await interaction.response.edit_message(view=self)
-        await interaction.followup.send(
-            f"❌ <@{self.target}> отклонил вызов."
-        )
-
-
 async def setup(bot: commands.Bot) -> None:
-    await bot.add_cog(Battle(bot))
+    await bot.add_cog(BattleCog(bot))
