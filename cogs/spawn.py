@@ -9,15 +9,13 @@ from discord import app_commands
 from discord.ext import commands
 
 import pokeapi_client
+from data.locations import find_location_by_channel_name, get_location
 from pokeapi_client import PokeAPIError
 from utils import EMBED_COLOR, GENDER_EMOJI, format_moves, format_types
 
 log = logging.getLogger(__name__)
 
 
-# ==========================================================================
-#  ВЫБОР УСЛОВИЙ
-# ==========================================================================
 TIME_CHOICES = [
     app_commands.Choice(name="☀️ Полдень", value="noon"),
     app_commands.Choice(name="🌞 День", value="day"),
@@ -74,68 +72,32 @@ def is_master():
     return app_commands.check(predicate)
 
 
-# ==========================================================================
-#  ФИЛЬТРАЦИЯ ПУЛА
-# ==========================================================================
+# --------------------------------------------------------------------------- #
+#                           ФИЛЬТРАЦИЯ ПО ТИПА                                 #
+# --------------------------------------------------------------------------- #
 
-_pool_cache: dict[str, list[int]] = {}
+_type_cache: dict[str, list[str]] = {}
 
 
-async def _fetch_type_pokemon(type_name: str) -> list[int]:
-    """Возвращает список ID покемонов указанного типа (1–1025). С кэшем."""
-    if type_name in _pool_cache:
-        return _pool_cache[type_name]
-
-    url = f"https://pokeapi.co/api/v2/type/{type_name}"
+async def _get_types(name: str) -> list[str]:
+    """Возвращает список типов покемона по имени (с кэшем)."""
+    if name in _type_cache:
+        return _type_cache[name]
     try:
-        data = await pokeapi_client._fetch_json(url)
+        data = await pokeapi_client.get_pokemon_by_name(name)
+        types = data.get("types", [])
     except PokeAPIError:
-        return []
-
-    out: list[int] = []
-    for entry in data.get("pokemon", []) or []:
-        try:
-            pid = int(entry["pokemon"]["url"].rstrip("/").split("/")[-1])
-        except (KeyError, ValueError):
-            continue
-        if 1 <= pid <= 1025:
-            out.append(pid)
-
-    _pool_cache[type_name] = out
-    return out
-
-
-async def _filter_pool(terrain: str, lure: str) -> list[int]:
-    """Возвращает список ID покемонов, подходящих под условия."""
-    pool: Optional[set[int]] = None
-
-    # --- Фильтр по местности ---
-    if terrain == "water":
-        s = set(await _fetch_type_pokemon("water"))
-        pool = s if pool is None else pool & s
-    elif terrain == "cave":
-        s = set(await _fetch_type_pokemon("rock"))
-        s |= set(await _fetch_type_pokemon("ground"))
-        s |= set(await _fetch_type_pokemon("ghost"))
-        pool = s if pool is None else pool & s
-    elif terrain == "forest":
-        s = set(await _fetch_type_pokemon("grass"))
-        s |= set(await _fetch_type_pokemon("bug"))
-        pool = s if pool is None else pool & s
-    # land — без фильтра
-
-    # --- Фильтр по приманке ---
-    if lure and lure != "none":
-        s = set(await _fetch_type_pokemon(lure))
-        pool = s if pool is None else pool & s
-
-    if not pool:
-        return list(range(1, 1026))
-    return [p for p in pool if 1 <= p <= 1025]
+        types = []
+    _type_cache[name] = types
+    return types
 
 
 def _time_label(key: str) -> str:
-    return {"noon": "☀️ Полдень", "day": "🌞 День", "night": "🌙 Ночь"}.get(key, key)
+    return {
+        "noon": "☀️ Полдень",
+        "day": "🌞 День",
+        "night": "🌙 Ночь",
+    }.get(key, key)
 
 
 def _terrain_label(key: str) -> str:
@@ -154,6 +116,39 @@ def _lure_label(key: str) -> str:
         if ch.value == key:
             return ch.name
     return key
+
+
+async def _filter_pool(
+    base_pool: list[str], terrain: str, lure: str
+) -> list[str]:
+    """Фильтрует пул локации по местности и приманке."""
+    pool = list(base_pool)
+
+    # Фильтр по местности
+    if terrain != "land":
+        allow = {
+            "water": ["water"],
+            "cave": ["rock", "ground", "ghost"],
+            "forest": ["grass", "bug"],
+        }.get(terrain, [])
+        if allow:
+            filtered = []
+            for name in pool:
+                types = await _get_types(name)
+                if any(t in types for t in allow):
+                    filtered.append(name)
+            pool = filtered
+
+    # Фильтр по приманке
+    if lure and lure != "none":
+        filtered = []
+        for name in pool:
+            types = await _get_types(name)
+            if lure in types:
+                filtered.append(name)
+        pool = filtered
+
+    return pool
 
 
 class Spawn(commands.Cog):
@@ -188,34 +183,61 @@ class Spawn(commands.Cog):
     ) -> None:
         await interaction.response.defer()
 
-        # Проверка канала — только в каналах-локациях
-        from cogs.inventory import SHOP_CHANNELS
-        if (interaction.channel_id or 0) not in SHOP_CHANNELS:
+        channel = interaction.channel
+        if channel is None:
+            await interaction.followup.send("❌ Только на сервере.", ephemeral=True)
+            return
+
+        loc_key = find_location_by_channel_name(channel.name)
+        if not loc_key:
             await interaction.followup.send(
-                "❌ `/spawn` работает только в каналах локаций.",
+                "❌ `/spawn` работает только в каналах локаций "
+                "(например, `#хошинори`, `#цукисиро` и т.д.).",
+                ephemeral=True,
+            )
+            return
+
+        loc = get_location(loc_key)
+        base_pool = loc.get("encounters") or []
+
+        if not base_pool:
+            await interaction.followup.send(
+                f"❌ В локации **{loc['name']}** не задан пул спавна.",
                 ephemeral=True,
             )
             return
 
         lure_key = lure.value if lure else "none"
 
-        # Подбираем пул
-        pool = await _filter_pool(terrain.value, lure_key)
+        pool = await _filter_pool(base_pool, terrain.value, lure_key)
         if not pool:
             await interaction.followup.send(
-                "❌ По таким условиям покемон не найден. Уберите приманку или смените местность.",
+                "❌ По таким условиям покемон не найден. "
+                "Уберите приманку или смените местность.",
                 ephemeral=True,
             )
             return
 
-        # Случайный покемон
-        species_id = random.choice(pool)
-        try:
-            data = await pokeapi_client.get_pokemon(species_id)
-            gender = await pokeapi_client.roll_gender(data["id"])
-        except PokeAPIError as e:
-            await interaction.followup.send(f"⚠️ {e}", ephemeral=True)
+        # Берём случайного из пула. Пробуем несколько раз, если PokéAPI не отвечает.
+        random.shuffle(pool)
+        data = None
+        for name in pool[:5]:
+            try:
+                data = await pokeapi_client.get_pokemon_by_name(name)
+                break
+            except PokeAPIError:
+                continue
+
+        if data is None:
+            await interaction.followup.send(
+                "⚠️ PokéAPI не отвечает, попробуйте позже.", ephemeral=True
+            )
             return
+
+        try:
+            gender = await pokeapi_client.roll_gender(data["id"])
+        except Exception:
+            gender = "genderless"
 
         moves = pokeapi_client.pick_random_moves(data, 4)
         nick = (nickname or "").strip() or None
@@ -224,7 +246,6 @@ class Spawn(commands.Cog):
         if nick:
             display_name = f"{nick} ({data['name']})"
 
-        # Эмбед
         embed = discord.Embed(
             title=f"🌿 Появление: {display_name}",
             color=EMBED_COLOR,
