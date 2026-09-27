@@ -1,4 +1,4 @@
-"""Боевая система: /battle @юзер + кнопки, смена и замена покемонов."""
+"""Боевая система: /battle @юзер + кнопки, смена, замена, поле, способности."""
 import logging
 import random
 from typing import Optional
@@ -15,8 +15,13 @@ from battle_engine import (
     SideField,
     accuracy_check,
     apply_end_of_turn,
+    apply_field_move,
+    apply_intimidate,
+    apply_switch_in_hazards,
     calc_damage,
     crit_check,
+    is_field_move,
+    on_switch_in_ability,
 )
 from database import get_active_profile, get_trainer, inc_losses, inc_wins
 from pokeapi_client import PokeAPIError
@@ -93,10 +98,7 @@ class SwitchSelect(discord.ui.Select):
                 continue
             name = mon.get("nickname") or f"#{mon.get('species_id')}"
             options.append(
-                discord.SelectOption(
-                    label=f"{name} • {bp} HP"[:100],
-                    value=str(i),
-                )
+                discord.SelectOption(label=f"{name} • {bp} HP"[:100], value=str(i))
             )
             if len(options) >= 25:
                 break
@@ -117,9 +119,9 @@ class SwitchSelect(discord.ui.Select):
                 "Нет живых покемонов для смены.", ephemeral=True
             )
             return
-
-        idx = int(self.values[0])
-        await self.battle.switch_pokemon(interaction, self.uid, idx)
+        await self.battle.switch_pokemon(
+            interaction, self.uid, int(self.values[0])
+        )
 
 
 class SwitchView(discord.ui.View):
@@ -159,7 +161,6 @@ class BattleView(discord.ui.View):
         for i, move in enumerate(attacker.moves[:4]):
             self.add_item(BattleMoveButton(battle, owner, move, i))
 
-        # Кнопка смены покемона
         switch_btn = discord.ui.Button(
             label="Сменить покемона",
             style=discord.ButtonStyle.secondary,
@@ -210,27 +211,37 @@ class Battle:
             if not ok:
                 await self.channel.send(f"❌ Не удалось загрузить покемона у <@{uid}>.")
                 return False
-            # Инициализируем HP всех покемонов партии
             for i, mon in enumerate(self.parties[uid]):
-                if i in self.party_hp[uid]:
-                    continue
-                hp = self._calc_max_hp(mon)
-                self.party_hp[uid][i] = hp
+                if i not in self.party_hp[uid]:
+                    self.party_hp[uid][i] = self._calc_max_hp(mon)
 
         await self.channel.send(
             f"⚔️ **Бой начался!** <@{self.players[0]}> против <@{self.players[1]}>"
         )
+
+        # Switch-in способности и шипы при старте
+        self.log_lines = []
+        for uid in self.players:
+            mon = self.current[uid]
+            # Intimidate — понижает атаку соперника
+            if (mon.ability or "").lower() == "intimidate":
+                opponent_id = self._other(mon)
+                opponent = self.current.get(opponent_id)
+                if opponent:
+                    line = apply_intimidate(opponent)
+                    self.log_lines.append(line)
+            for line in on_switch_in_ability(mon):
+                self.log_lines.append(line)
+
         await self.send_main_message()
         await self.send_move_views()
         return True
 
     # ------------------------------------------------------------------ #
     def _calc_max_hp(self, mon: dict) -> int:
-        """Грубая оценка max HP для неактивных покемонов."""
         return 100
 
     async def _load_active(self, uid: int, idx: int) -> bool:
-        """Загружает покемона по индексу как активного."""
         party = self.parties[uid]
         if idx < 0 or idx >= len(party):
             return False
@@ -243,7 +254,6 @@ class Battle:
         bp = BattlePokemon(
             data, mon.get("level", 5), moves, nature=mon.get("nature", "hardy")
         )
-        # Сохраняем текущее HP из партии, если есть
         saved_hp = self.party_hp.get(uid, {}).get(idx)
         if saved_hp is not None and saved_hp > 0:
             bp.hp = min(saved_hp, bp.max_hp)
@@ -304,7 +314,7 @@ class Battle:
             view = BattleView(self, uid)
             embed = discord.Embed(
                 title=f"🎯 Твой ход, <@{uid}>",
-                description=f"**{attacker.name}** — выбери атаку:",
+                description=f"**{attacker.name}** — выбери действие:",
                 color=0x457B9D,
             )
             m = await self.channel.send(content=f"<@{uid}>", embed=embed, view=view)
@@ -337,14 +347,21 @@ class Battle:
 
         self.log_lines = []
 
-        # Проверка статусов
+        # Статусы (сон/паралич/заморозка)
         skip_line = self._status_precheck(attacker)
         if skip_line:
             self.log_lines.append(skip_line)
         else:
-            await self._resolve_attack(attacker, defender, move)
+            # Проверяем, полевая ли это атака
+            effect_key = is_field_move(move["name"])
+            if effect_key:
+                await self._resolve_field_move(
+                    attacker, defender, move, effect_key, uid, opponent_id
+                )
+            else:
+                await self._resolve_attack(attacker, defender, move)
 
-        # End-of-turn для обоих
+        # End-of-turn
         for mon in (attacker, defender):
             tick = apply_end_of_turn(mon)
             if tick:
@@ -357,13 +374,51 @@ class Battle:
                         f"🟪 **{mon.name}** страдает от яда (−{tick['dmg']} HP)."
                     )
 
+        # Сбрасываем protect после хода
+        attacker.protect = False
+        defender.protect = False
+
         self._save_active_hp(uid)
         self._save_active_hp(opponent_id)
         self.fields[uid].tick()
         self.fields[opponent_id].tick()
 
-        # Проверка faint
         await self._handle_faints()
+
+    # ------------------------------------------------------------------ #
+    async def _resolve_field_move(
+        self,
+        attacker: BattlePokemon,
+        defender: BattlePokemon,
+        move: dict,
+        effect_key: str,
+        uid: int,
+        opponent_id: int,
+    ) -> None:
+        """Применяет полевой эффект."""
+        self.log_lines.append(
+            msg.pick(msg.ATTACK_TEMPLATES).format(who=attacker.name, move=move["name"])
+        )
+
+        # Protect
+        if effect_key == "protect":
+            attacker.protect = True
+            self.log_lines.append(
+                msg.pick(msg.PROTECT_LINES).format(who=attacker.name)
+            )
+            return
+
+        # Reflect / Light Screen / Tailwind — на свою сторону
+        if effect_key in ("reflect", "light_screen", "tailwind"):
+            line = apply_field_move(effect_key, self.fields[uid])
+            self.log_lines.append(line)
+            return
+
+        # Спайки / камни / паутина — на сторону соперника
+        if effect_key in ("spikes", "toxic_spikes", "stealth_rock", "sticky_web"):
+            line = apply_field_move(effect_key, self.fields[opponent_id])
+            self.log_lines.append(line)
+            return
 
     # ------------------------------------------------------------------ #
     def _status_precheck(self, attacker: BattlePokemon) -> Optional[str]:
@@ -389,6 +444,13 @@ class Battle:
         self.log_lines.append(
             msg.pick(msg.ATTACK_TEMPLATES).format(who=attacker.name, move=move["name"])
         )
+
+        # Protect блокирует
+        if defender.protect:
+            self.log_lines.append(
+                f"🛡️ **{defender.name}** блокирует атаку — Protect!"
+            )
+            return
 
         hit, _ = accuracy_check(attacker, defender, move)
         if not hit:
@@ -440,7 +502,6 @@ class Battle:
     async def switch_pokemon(
         self, interaction: discord.Interaction, uid: int, new_idx: int
     ) -> None:
-        """Смена покемона — тратит ход."""
         if self.finished:
             await interaction.response.send_message("Бой уже завершён.", ephemeral=True)
             return
@@ -448,9 +509,7 @@ class Battle:
         await interaction.response.defer()
         await self._cleanup_views()
 
-        old = self.current.get(uid)
         self._save_active_hp(uid)
-
         if not await self._load_active(uid, new_idx):
             await self.channel.send(f"❌ Не удалось сменить покемона у <@{uid}>.")
             return
@@ -460,37 +519,45 @@ class Battle:
             msg.pick(msg.SWITCH_LINES).format(who=f"<@{uid}>", next_mon=new.name)
         ]
 
-        # Противник атакует по тому, кто вышел
-        opponent_id = self.players[0] if uid == self.players[1] else self.players[1]
-        defender = self.current[opponent_id]
+        # Шипы при switch-in
+        for line in apply_switch_in_hazards(new, self.fields[uid]):
+            self.log_lines.append(line)
 
-        # Ход переходит противнику — он атакует нового покемона
-        if opponent_id not in self.current:
-            await self.send_main_message()
-            await self.send_move_views()
-            return
+        # Способности при switch-in
+        for line in on_switch_in_ability(new):
+            self.log_lines.append(line)
+        if (new.ability or "").lower() == "intimidate":
+            opponent_id = self.players[0] if uid == self.players[1] else self.players[1]
+            opponent = self.current.get(opponent_id)
+            if opponent:
+                self.log_lines.append(apply_intimidate(opponent))
 
-        await self.send_main_message()
-        await self.send_move_views()
+        if new.fainted:
+            self.log_lines.append(
+                msg.pick(msg.FAINT_LINES).format(name=new.name)
+            )
+
+        self._save_active_hp(uid)
+        await self._handle_faints()
 
     # ------------------------------------------------------------------ #
     async def _handle_faints(self) -> None:
-        """Проверяет, кто выбыл, и предлагает замену или завершает бой."""
         for uid in self.players:
             mon = self.current.get(uid)
             if mon and mon.fainted:
                 self._save_active_hp(uid)
-                self.log_lines.append(
-                    msg.pick(msg.FAINT_LINES).format(name=mon.name)
-                )
+                if not any(
+                    "теряет сознание" in l or "падает без сил" in l for l in self.log_lines
+                ):
+                    self.log_lines.append(
+                        msg.pick(msg.FAINT_LINES).format(name=mon.name)
+                    )
 
-        # Проверяем, остались ли живые у каждого игрока
         alive_status: dict[int, bool] = {}
         for uid in self.players:
             alive = any(hp > 0 for hp in self.party_hp[uid].values())
             alive_status[uid] = alive
 
-        # Если у обоих есть живые — предлагаем замену тем, у кого активный мёртв
         if all(alive_status.values()):
             await self.send_main_message()
 
@@ -509,14 +576,12 @@ class Battle:
                 await self.send_move_views()
             return
 
-        # У кого-то нет живых — конец боя
         losers = [uid for uid, alive in alive_status.items() if not alive]
         winners = [uid for uid, alive in alive_status.items() if alive]
 
         if losers and winners:
             await self._end_battle(winners[0], losers[0])
         else:
-            # Оба без живых — ничья
             await self._end_battle(None, None)
 
     # ------------------------------------------------------------------ #
