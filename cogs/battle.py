@@ -1,4 +1,4 @@
-"""Боевая система: /battle @юзер + кнопки, смена, замена, поле, способности."""
+"""Боевая система: /battle @юзер — с погодой, полем, способностями, сменой."""
 import logging
 import random
 from typing import Optional
@@ -13,6 +13,8 @@ from battle_data import STATUS_EMOJI, damage_label
 from battle_engine import (
     BattlePokemon,
     SideField,
+    WeatherField,
+    ability_weather_on_switch,
     accuracy_check,
     apply_end_of_turn,
     apply_field_move,
@@ -21,6 +23,7 @@ from battle_engine import (
     calc_damage,
     crit_check,
     is_field_move,
+    is_weather_move,
     on_switch_in_ability,
 )
 from database import get_active_profile, get_trainer, inc_losses, inc_wins
@@ -51,6 +54,7 @@ async def _load_mon_data(mon: dict) -> Optional[dict]:
         "stats": data.get("stats", {}),
         "artwork": data.get("artwork"),
         "ability": ability,
+        "item": mon.get("item"),
         "gender": mon.get("gender", "genderless"),
     }
 
@@ -66,6 +70,7 @@ async def _load_moves(move_names: list[str]) -> list[dict]:
             continue
         out.append({
             "name": name.replace("-", " ").title(),
+            "raw_name": name,
             "power": m.get("power") or 0,
             "type": (m.get("type") or {}).get("name", "normal"),
             "accuracy": m.get("accuracy"),
@@ -107,7 +112,6 @@ class SwitchSelect(discord.ui.Select):
             options.append(
                 discord.SelectOption(label="Нет доступных покемонов", value="-1")
             )
-
         super().__init__(placeholder="Выбери покемона…", options=options)
 
     async def callback(self, interaction: discord.Interaction) -> None:
@@ -119,9 +123,7 @@ class SwitchSelect(discord.ui.Select):
                 "Нет живых покемонов для смены.", ephemeral=True
             )
             return
-        await self.battle.switch_pokemon(
-            interaction, self.uid, int(self.values[0])
-        )
+        await self.battle.switch_pokemon(interaction, self.uid, int(self.values[0]))
 
 
 class SwitchView(discord.ui.View):
@@ -131,7 +133,7 @@ class SwitchView(discord.ui.View):
 
 
 # ==========================================================================
-#                          ВЫБОР АТАКИ
+#                          КНОПКИ АТАК
 # ==========================================================================
 class BattleMoveButton(discord.ui.Button):
     def __init__(self, battle: "Battle", owner: int, move: dict, idx: int):
@@ -188,6 +190,7 @@ class Battle:
         self.channel = channel
         self.players = [p1, p2]
         self.fields = {p1: SideField(), p2: SideField()}
+        self.weather = WeatherField()
         self.current: dict[int, BattlePokemon] = {}
         self.parties: dict[int, list[dict]] = {}
         self.active_index: dict[int, int] = {p1: 0, p2: 0}
@@ -219,19 +222,24 @@ class Battle:
             f"⚔️ **Бой начался!** <@{self.players[0]}> против <@{self.players[1]}>"
         )
 
-        # Switch-in способности и шипы при старте
         self.log_lines = []
+        # Switch-in способности
         for uid in self.players:
             mon = self.current[uid]
-            # Intimidate — понижает атаку соперника
-            if (mon.ability or "").lower() == "intimidate":
-                opponent_id = self._other(mon)
-                opponent = self.current.get(opponent_id)
-                if opponent:
-                    line = apply_intimidate(opponent)
-                    self.log_lines.append(line)
             for line in on_switch_in_ability(mon):
                 self.log_lines.append(line)
+            if (mon.ability or "").lower() == "intimidate":
+                opponent_id = self._other(mon)
+                opp = self.current.get(opponent_id)
+                if opp:
+                    self.log_lines.append(apply_intimidate(opp))
+            # Авто-погода от способности
+            w = ability_weather_on_switch(mon)
+            if w:
+                self.weather.set(w)
+                self.log_lines.append(
+                    msg.pick(msg.WEATHER_LINES.get(w, ["Погода меняется!"]))
+                )
 
         await self.send_main_message()
         await self.send_move_views()
@@ -273,7 +281,14 @@ class Battle:
         m1 = self.current[p1]
         m2 = self.current[p2]
 
-        embed = discord.Embed(title="⚔️ Состояние боя", color=0xE63946)
+        weather_str = self.weather.label
+        if self.weather.kind != "none" and self.weather.turns > 0:
+            weather_str += f" ({self.weather.turns})"
+
+        embed = discord.Embed(
+            title=f"⚔️ Состояние боя — {weather_str}",
+            color=0xE63946,
+        )
         embed.add_field(
             name=f"👤 <@{p1}>",
             value=(
@@ -299,7 +314,7 @@ class Battle:
         if self.log_lines:
             embed.add_field(
                 name="📜 Лог",
-                value="\n".join(self.log_lines[-6:]),
+                value="\n".join(self.log_lines[-8:]),
                 inline=False,
             )
         if m1.sprite:
@@ -347,34 +362,45 @@ class Battle:
 
         self.log_lines = []
 
-        # Статусы (сон/паралич/заморозка)
         skip_line = self._status_precheck(attacker)
         if skip_line:
             self.log_lines.append(skip_line)
         else:
-            # Проверяем, полевая ли это атака
+            weather_key = is_weather_move(move.get("raw_name", move["name"]))
             effect_key = is_field_move(move["name"])
-            if effect_key:
+
+            if weather_key:
+                await self._resolve_weather_move(attacker, weather_key)
+            elif effect_key:
                 await self._resolve_field_move(
                     attacker, defender, move, effect_key, uid, opponent_id
                 )
             else:
                 await self._resolve_attack(attacker, defender, move)
 
-        # End-of-turn
+        # End-of-turn: статусы + погода
         for mon in (attacker, defender):
-            tick = apply_end_of_turn(mon)
-            if tick:
-                if tick["type"] == "tick_burn":
+            events = apply_end_of_turn(mon, self.weather)
+            for ev in events:
+                if ev["type"] == "tick_burn":
                     self.log_lines.append(
-                        f"🟥 **{mon.name}** страдает от ожога (−{tick['dmg']} HP)."
+                        f"🟥 **{mon.name}** страдает от ожога (−{ev['dmg']} HP)."
                     )
-                elif tick["type"] == "tick_poison":
+                elif ev["type"] == "tick_poison":
                     self.log_lines.append(
-                        f"🟪 **{mon.name}** страдает от яда (−{tick['dmg']} HP)."
+                        f"🟪 **{mon.name}** страдает от яда (−{ev['dmg']} HP)."
                     )
+                elif ev["type"] == "tick_weather":
+                    tmpl = msg.pick(
+                        msg.WEATHER_TICK_LINES.get(ev["kind"], ["Погода бьёт {name}."])
+                    )
+                    self.log_lines.append(tmpl.format(name=mon.name, dmg=ev["dmg"]))
+                elif ev["type"] == "heal_weather":
+                    tmpl = msg.pick(
+                        msg.WEATHER_HEAL_LINES.get(ev["kind"], ["{name} восстанавливает HP."])
+                    )
+                    self.log_lines.append(tmpl.format(name=mon.name, hp=ev["hp"]))
 
-        # Сбрасываем protect после хода
         attacker.protect = False
         defender.protect = False
 
@@ -383,9 +409,21 @@ class Battle:
         self.fields[uid].tick()
         self.fields[opponent_id].tick()
 
+        # Погода тикает раз в ход
+        old_weather = self.weather.kind
+        self.weather.tick()
+        if old_weather != "none" and self.weather.kind == "none":
+            self.log_lines.append(msg.pick(msg.WEATHER_END_LINES))
+
         await self._handle_faints()
 
     # ------------------------------------------------------------------ #
+    async def _resolve_weather_move(self, attacker: BattlePokemon, kind: str) -> None:
+        self.weather.set(kind)
+        self.log_lines.append(
+            msg.pick(msg.WEATHER_LINES.get(kind, ["Погода меняется!"]))
+        )
+
     async def _resolve_field_move(
         self,
         attacker: BattlePokemon,
@@ -395,12 +433,10 @@ class Battle:
         uid: int,
         opponent_id: int,
     ) -> None:
-        """Применяет полевой эффект."""
         self.log_lines.append(
             msg.pick(msg.ATTACK_TEMPLATES).format(who=attacker.name, move=move["name"])
         )
 
-        # Protect
         if effect_key == "protect":
             attacker.protect = True
             self.log_lines.append(
@@ -408,13 +444,11 @@ class Battle:
             )
             return
 
-        # Reflect / Light Screen / Tailwind — на свою сторону
         if effect_key in ("reflect", "light_screen", "tailwind"):
             line = apply_field_move(effect_key, self.fields[uid])
             self.log_lines.append(line)
             return
 
-        # Спайки / камни / паутина — на сторону соперника
         if effect_key in ("spikes", "toxic_spikes", "stealth_rock", "sticky_web"):
             line = apply_field_move(effect_key, self.fields[opponent_id])
             self.log_lines.append(line)
@@ -445,14 +479,13 @@ class Battle:
             msg.pick(msg.ATTACK_TEMPLATES).format(who=attacker.name, move=move["name"])
         )
 
-        # Protect блокирует
         if defender.protect:
             self.log_lines.append(
                 f"🛡️ **{defender.name}** блокирует атаку — Protect!"
             )
             return
 
-        hit, _ = accuracy_check(attacker, defender, move)
+        hit, _ = accuracy_check(attacker, defender, move, self.weather)
         if not hit:
             self.log_lines.append(
                 msg.pick(msg.MISS_TEMPLATES).format(target=defender.name)
@@ -464,6 +497,7 @@ class Battle:
             attacker, defender, move,
             defender_side=self.fields[self._other(attacker)],
             attacker_side=self.fields[self._me(attacker)],
+            weather=self.weather,
             crit=is_crit,
         )
         mult = result["mult"]
@@ -519,23 +553,25 @@ class Battle:
             msg.pick(msg.SWITCH_LINES).format(who=f"<@{uid}>", next_mon=new.name)
         ]
 
-        # Шипы при switch-in
         for line in apply_switch_in_hazards(new, self.fields[uid]):
             self.log_lines.append(line)
 
-        # Способности при switch-in
         for line in on_switch_in_ability(new):
             self.log_lines.append(line)
         if (new.ability or "").lower() == "intimidate":
             opponent_id = self.players[0] if uid == self.players[1] else self.players[1]
-            opponent = self.current.get(opponent_id)
-            if opponent:
-                self.log_lines.append(apply_intimidate(opponent))
+            opp = self.current.get(opponent_id)
+            if opp:
+                self.log_lines.append(apply_intimidate(opp))
+
+        # Погода от способности
+        w = ability_weather_on_switch(new)
+        if w and self.weather.kind != w:
+            self.weather.set(w)
+            self.log_lines.append(msg.pick(msg.WEATHER_LINES.get(w, ["Погода меняется!"])))
 
         if new.fainted:
-            self.log_lines.append(
-                msg.pick(msg.FAINT_LINES).format(name=new.name)
-            )
+            self.log_lines.append(msg.pick(msg.FAINT_LINES).format(name=new.name))
 
         self._save_active_hp(uid)
         await self._handle_faints()
@@ -610,7 +646,7 @@ class Battle:
 
 
 # ==========================================================================
-#                          ПРИГЛАШЕНИЕ НА БОЙ
+#                          ПРИГЛАШЕНИЕ
 # ==========================================================================
 class InviteView(discord.ui.View):
     def __init__(self, host: int, target: int, cog: "BattleCog"):
@@ -692,7 +728,9 @@ class BattleCog(commands.Cog):
             ),
             color=0xE63946,
         )
-        await interaction.response.send_message(embed=embed, view=view)
+        await interaction.response.send_message(embed=view and view or None)
+        # Правильный вызов:
+        await interaction.edit_original_response(embed=embed, view=view)
 
 
 async def setup(bot: commands.Bot) -> None:
