@@ -78,24 +78,22 @@ STATUS_RU = {
     "infatuated":   "влюблённость",
 }
 
-# Иммунитеты типов к статусам
 TYPE_STATUS_IMMUNITY: dict[str, set[str]] = {
-    "burn":      {"fire"},
-    "poison":    {"poison", "steel"},
+    "burn":         {"fire"},
+    "poison":       {"poison", "steel"},
     "badly_poison": {"poison", "steel"},
-    "paralysis": {"electric"},
-    "freeze":    {"ice"},
+    "paralysis":    {"electric"},
+    "freeze":       {"ice"},
 }
 
-# Иммунитеты способностей
 ABILITY_STATUS_IMMUNITY: dict[str, set[str]] = {
-    "burn":      {"water-veil", "thermal-exchange"},
-    "poison":    {"immunity"},
+    "burn":         {"water-veil", "thermal-exchange"},
+    "poison":       {"immunity"},
     "badly_poison": {"immunity"},
-    "paralysis": {"limber"},
-    "sleep":     {"insomnia", "vital-spirit"},
-    "freeze":    {"magma-armor"},
-    "confused":  {"own-tempo"},
+    "paralysis":    {"limber"},
+    "sleep":        {"insomnia", "vital-spirit"},
+    "freeze":       {"magma-armor"},
+    "confused":     {"own-tempo"},
 }
 
 
@@ -119,6 +117,7 @@ async def _load_mon_data(mon: dict) -> Optional[dict]:
 
     return {
         "instance_id": mon.get("instance_id", ""),
+        "id": data.get("id"),
         "name": data["name"].title(),
         "types": data.get("types", []),
         "stats": data.get("stats", {}),
@@ -126,27 +125,49 @@ async def _load_mon_data(mon: dict) -> Optional[dict]:
         "ability": ability,
         "item": mon.get("item"),
         "gender": mon.get("gender", "genderless"),
+        "all_moves": list(data.get("moves", []) or []),
     }
 
 
 async def _load_moves(move_names: list[str]) -> list[dict]:
+    # Если среди имён есть не-ASCII (русские) — строим/грузим индекс один раз
+    if any(m and not m.isascii() for m in move_names[:4]):
+        try:
+            await pokeapi_client.ensure_move_index()
+        except Exception:
+            log.exception("Не удалось построить индекс русских имён атак")
+
     out: list[dict] = []
     for name in move_names[:4]:
+        if not name:
+            continue
+        resolved = pokeapi_client.resolve_move_name(name)
+        raw = resolved.lower().replace(" ", "-").strip()
         try:
             m = await pokeapi_client._fetch_json(
-                f"https://pokeapi.co/api/v2/move/{name}"
+                f"https://pokeapi.co/api/v2/move/{raw}"
             )
         except PokeAPIError:
+            log.warning("Атака не найдена: %r (→ %r)", name, raw)
             continue
         out.append({
-            "name": name.replace("-", " ").title(),
-            "raw_name": name,
+            "name": raw.replace("-", " ").title(),
+            "raw_name": raw,
             "power": m.get("power") or 0,
             "type": (m.get("type") or {}).get("name", "normal"),
             "accuracy": m.get("accuracy"),
             "damage_class": (m.get("damage_class") or {}).get("name", "physical"),
         })
     return out
+
+
+async def _fallback_moves(mon_data: dict, level: int) -> list[dict]:
+    """Если у покемона в БД нет атак — берём случайные из PokéAPI."""
+    all_moves: list[str] = mon_data.get("all_moves") or []
+    if not all_moves:
+        return []
+    picks = random.sample(all_moves, min(6, len(all_moves)))
+    return await _load_moves(picks)
 
 
 def _hp_bar(mon: BattlePokemon) -> str:
@@ -327,7 +348,6 @@ class BattleView(discord.ui.View):
         if interaction.user.id != self.owner:
             await interaction.response.send_message("Это не ваш ход.", ephemeral=True)
             return
-        # ручная смена — регистрируем как действие
         await interaction.response.defer()
         await self.battle.register_action(
             interaction, self.owner, {"type": "manual_switch"}
@@ -363,11 +383,9 @@ class Battle:
         self.views: dict[int, discord.Message] = {}
         self.finished = False
 
-        # очередь ходов
         self.turn_actions: dict[int, dict] = {}
         self.turn_number: int = 0
 
-        # ожидание принудительной смены (pivot / baton / faint)
         self.pending_switch: dict[int, str] = {}
         self.switch_futures: dict[int, asyncio.Future] = {}
 
@@ -421,6 +439,17 @@ class Battle:
         if not data:
             return False
         moves = await _load_moves(mon.get("moves", []))
+        if not moves:
+            moves = await _fallback_moves(data, mon.get("level", 5))
+        if not moves:
+            moves = [{
+                "name": "Struggle",
+                "raw_name": "struggle",
+                "power": 50,
+                "type": "normal",
+                "accuracy": None,
+                "damage_class": "physical",
+            }]
 
         bp = BattlePokemon(
             data, mon.get("level", 5), moves, nature=mon.get("nature", "hardy")
@@ -462,7 +491,6 @@ class Battle:
             )
             return
 
-        # Если это "ручная смена", сразу показываем меню
         if action["type"] == "manual_switch":
             await interaction.followup.send(
                 "Кого выпустить?",
@@ -544,7 +572,6 @@ class Battle:
         if defender is None:
             return
 
-        # --- Пре-проверки статусов ---
         if not self._pre_move_check(attacker):
             return
 
@@ -563,14 +590,14 @@ class Battle:
                     move = forced
                     raw_name = encored_move
 
-        # --- Disable: заблокированная атака ---
+        # --- Disable ---
         if attacker.disabled_move and raw_name == attacker.disabled_move:
             self.log_lines.append(
                 f"🚫 **{move['name']}** заблокирован (Disable)!"
             )
             return
 
-        # --- Taunt: запрет статусных атак ---
+        # --- Taunt ---
         if attacker.volatile.get("taunt", 0) > 0 and is_status_move(raw_name):
             self.log_lines.append(
                 f"😤 **{attacker.name}** под Taunt — статусные атаки запрещены!"
@@ -584,6 +611,7 @@ class Battle:
                     who=attacker.name, move=move["name"]
                 )
             )
+            attacker.last_move = raw_name
             await self._wait_for_switch(uid, reason="baton")
             return
 
@@ -597,21 +625,25 @@ class Battle:
             self.log_lines.append(
                 msg.pick(msg.WEATHER_LINES.get(weather_key, ["Погода меняется!"]))
             )
+            attacker.last_move = raw_name
             return
 
         # --- Полевые ---
         effect_key = is_field_move(move["name"])
         if effect_key:
             await self._resolve_field_move(attacker, defender, move, effect_key, uid)
+            attacker.last_move = raw_name
             return
 
         # --- Статусные ---
         if is_status_move(raw_name):
             await self._do_status_move(attacker, defender, move, uid)
+            attacker.last_move = raw_name
             return
 
         # --- Обычный урон ---
         await self._resolve_attack(attacker, defender, move)
+        attacker.last_move = raw_name
 
         # --- Pivot (U-turn / Volt Switch / Flip Turn / Parting Shot) ---
         if is_pivot_move(raw_name):
@@ -621,8 +653,6 @@ class Battle:
             await self._wait_for_switch(uid, reason="pivot")
 
     def _pre_move_check(self, mon: BattlePokemon) -> bool:
-        """True — можно действовать, False — ход потерян."""
-        # Сон
         if mon.status == "sleep":
             mon.status_counter -= 1
             if mon.status_counter <= 0:
@@ -632,7 +662,6 @@ class Battle:
             self.log_lines.append(msg.pick(msg.SLEEP_SKIP).format(name=mon.name))
             return False
 
-        # Заморозка
         if mon.status == "freeze":
             if random.random() < 0.2:
                 mon.status = "none"
@@ -641,12 +670,10 @@ class Battle:
             self.log_lines.append(msg.pick(msg.FROZEN_SKIP).format(name=mon.name))
             return False
 
-        # Паралич — 25% на пропуск
         if mon.status == "paralysis" and random.random() < 0.25:
             self.log_lines.append(msg.pick(msg.PARALYSIS_SKIP).format(name=mon.name))
             return False
 
-        # Влюблённость — 50% на пропуск
         if "infatuated" in mon.volatile:
             if random.random() < 0.5:
                 self.log_lines.append(
@@ -659,7 +686,6 @@ class Battle:
                     msg.pick(msg.INFATUATED_END).format(name=mon.name)
                 )
 
-        # Конфуз — 33% ударить себя
         if "confused" in mon.volatile:
             mon.volatile["confused"] -= 1
             if mon.volatile["confused"] <= 0:
@@ -711,7 +737,6 @@ class Battle:
             crit_stage=crit_bonus,
         )
 
-        # --- Способность-иммунитет (Volt Absorb, Flash Fire и т.д.) ---
         immunity = result.get("ability_immunity")
         if immunity:
             effect = immunity.get("effect")
@@ -744,7 +769,6 @@ class Battle:
             )
             return
 
-        # --- Substitute принимает урон вместо покемона ---
         if defender.has_substitute:
             dmg = result["dmg"]
             if dmg >= defender.substitute_hp:
@@ -802,7 +826,6 @@ class Battle:
         target_name = data.get("target", "opponent")
         target = attacker if target_name == "self" else defender
 
-        # Substitute блокирует статусные, нацеленные на соперника
         if target_name == "opponent" and defender.has_substitute:
             self.log_lines.append(
                 msg.pick(msg.SUBSTITUTE_BLOCK).format(name=defender.name)
@@ -862,7 +885,6 @@ class Battle:
             )
             return
 
-        # Волатильные (confused / infatuated)
         if status in ("confused", "infatuated"):
             if status in target.volatile:
                 self.log_lines.append(f"⚠️ **{target.name}** уже под эффектом.")
@@ -891,7 +913,6 @@ class Battle:
                 )
             return
 
-        # Обычные статусы: только один
         if target.status != "none":
             self.log_lines.append(f"⚠️ **{target.name}** уже имеет статус.")
             return
@@ -1038,7 +1059,6 @@ class Battle:
                 msg.pick(msg.ENCORE_NO_MOVE).format(name=defender.name)
             )
             return
-        # не энкорим статусные атаки с 0 power? — вообще-то можно
         turns = int(data.get("turns", 3))
         defender.volatile["encore"] = turns
         defender.encored_move = last
@@ -1108,7 +1128,6 @@ class Battle:
         saved_volatile = dict(old.volatile) if old and transfer_state else None
         saved_sub_hp = old.substitute_hp if old and transfer_state else 0
 
-        # Способности при выходе (Regenerator, Natural Cure)
         if old:
             line = apply_switch_heal(old)
             if line:
@@ -1155,7 +1174,6 @@ class Battle:
     async def handle_switch_pick(
         self, uid: int, idx: int, reason: Optional[str] = None
     ) -> None:
-        """Вызывается из SwitchView callback — как принудительный, так и ручной."""
         await self._do_switch(uid, idx, transfer_state=(reason == "baton"))
         self.pending_switch.pop(uid, None)
         fut = self.switch_futures.pop(uid, None)
@@ -1163,7 +1181,6 @@ class Battle:
             fut.set_result(True)
 
     async def _wait_for_switch(self, uid: int, *, reason: str) -> None:
-        """Ждёт, пока игрок выберет покемона (pivot / baton)."""
         self.pending_switch[uid] = reason
         loop = asyncio.get_running_loop()
         fut: asyncio.Future = loop.create_future()
@@ -1196,7 +1213,6 @@ class Battle:
         inv[item_key] = max(0, inv.get(item_key, 1) - 1)
         self.log_lines.append(log_line)
 
-        # Dire Hit — +1 крит-стадия
         if item_key == "dire_hit":
             mon.crit_bonus = _crit_bonus(mon) + 1
 
@@ -1204,7 +1220,6 @@ class Battle:
     #  КОНЕЦ ХОДА
     # ------------------------------------------------------------------ #
     async def _post_turn(self) -> None:
-        # Leech Seed — сначала собираем данные, чтобы отхилить «противника»
         leech_heals: dict[int, int] = {}
 
         for uid in self.players:
@@ -1265,7 +1280,6 @@ class Battle:
                         tmpl.format(name=mon.name, stat=ev["stat"])
                     )
 
-        # Leech Seed: хилит противоположного покемона
         for uid, healed in leech_heals.items():
             other_uid = self._other_player(uid)
             healer = self.current.get(other_uid)
@@ -1277,7 +1291,6 @@ class Battle:
                         f"от Leech Seed."
                     )
 
-        # Тик Taunt / Encore / Disable
         for uid in self.players:
             mon = self.current.get(uid)
             if not mon:
@@ -1299,12 +1312,10 @@ class Battle:
                         if key == "disable":
                             mon.disabled_move = None
 
-        # Тик полевых эффектов
         for uid in self.players:
             self._save_active_hp(uid)
             self.fields[uid].tick()
 
-        # Тик погоды
         old = self.weather.kind
         self.weather.tick()
         if old != "none" and self.weather.kind == "none":
@@ -1339,30 +1350,21 @@ class Battle:
 
         await self.send_main_message()
 
-        # Принудительная смена после faint
+        # Принудительная смена после faint — ждём через _wait_for_switch
         fainted_uids = [
             uid for uid in self.players
             if self.current.get(uid) and self.current[uid].fainted
         ]
         for uid in fainted_uids:
             if uid not in self.pending_switch:
-                self.pending_switch[uid] = "faint"
+                other = self._other_player(uid)
                 await self.channel.send(
-                    f"<@{uid}>, твой покемон выбыл. Выбери следующего:"
+                    f"<@{other}>, ждём, пока соперник выберет покемона…"
                 )
-                await self.channel.send(
-                    view=SwitchView(self, uid, reason="faint")
-                )
+                await self._wait_for_switch(uid, reason="faint")
 
         if not fainted_uids:
             await self.send_move_views()
-        else:
-            # второй игрок ждёт
-            for uid in self.players:
-                if uid not in fainted_uids:
-                    await self.channel.send(
-                        f"<@{uid}>, ждём, пока соперник выберет покемона…"
-                    )
 
     # ------------------------------------------------------------------ #
     #  UI / ЛОГ
@@ -1413,7 +1415,6 @@ class Battle:
 
     async def send_move_views(self) -> None:
         for uid in self.players:
-            # не показываем, если ждём принудительной смены
             if uid in self.pending_switch:
                 continue
             attacker = self.current[uid]
