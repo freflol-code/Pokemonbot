@@ -29,7 +29,7 @@ _name_index_ready = False
 
 _ability_names_ru: dict[str, str] = {}
 
-# --- индекс русских имён атак (RU → EN) ---
+# --- индекс русских имён атак (RU → EN), строится из PokéAPI ---
 _move_ru_to_en: dict[str, str] = {}
 _move_index_lock = asyncio.Lock()
 _move_index_ready = False
@@ -403,9 +403,27 @@ async def ensure_move_index() -> dict[str, str]:
 
 
 def resolve_move_name(name: str) -> str:
-    """Если имя русское — ищет английский эквивалент. ASCII проходит как есть."""
+    """Если имя русское — ищет английский эквивалент.
+
+    Порядок:
+        1. ASCII — пропускаем как есть.
+        2. Ручной словарь из battle_data.MOVE_NAMES_RU.
+        3. Автоиндекс из move_index_ru.json (на случай, если PokéAPI
+           всё-таки знает это имя в официальной локализации).
+    """
     if not name:
         return name
     if name.isascii():
         return name
+
+    # 1) ручной словарь
+    try:
+        from battle_data import resolve_move_ru
+        manual = resolve_move_ru(name)
+        if manual:
+            return manual
+    except Exception:
+        log.exception("Не удалось использовать battle_data.resolve_move_ru")
+
+    # 2) автоиндекс
     return _move_ru_to_en.get(_norm_move_key(name), name)
