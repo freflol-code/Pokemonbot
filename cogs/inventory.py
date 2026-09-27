@@ -7,8 +7,6 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from data.locations import LOCATIONS as _LOCATIONS_DATA
-from data.locations import find_location_by_channel_name
 from database import (
     add_item,
     get_item_qty,
@@ -17,6 +15,46 @@ from database import (
     take_item,
 )
 from utils import EMBED_COLOR
+
+
+# ==========================================================================
+#  ЛОКАЦИИ — встроены в файл, без data/locations.py
+# ==========================================================================
+_LOCATIONS_DATA: dict[str, dict] = {
+    "hoshinori":          {"name": "Хошинори",           "emoji": "✨"},
+    "lastoris":           {"name": "Ласторис",           "emoji": "🌊"},
+    "verden":             {"name": "Верден",             "emoji": "🌿"},
+    "kaiseki":            {"name": "Кайсэки",            "emoji": "🔥"},
+    "nordkron":           {"name": "Нордкрон",           "emoji": "❄️"},
+    "aurelis":            {"name": "Аурелис",            "emoji": "⚡"},
+    "hibiki":             {"name": "Хибики",             "emoji": "🎐"},
+    "kurokane":           {"name": "Курокане",           "emoji": "⚙️"},
+    "lumier":             {"name": "Люмьер",             "emoji": "💫"},
+    "estera":             {"name": "Эстера",             "emoji": "🔮"},
+    "reigard":            {"name": "Рейгард",            "emoji": "🐉"},
+    "eidolon":            {"name": "Эйдолон",            "emoji": "👻"},
+    "asteris":            {"name": "Астэрис",            "emoji": "🏛️"},
+    "tsukishiro":         {"name": "Цукисиро",           "emoji": "🌙"},
+    "red_canyon":         {"name": "Красный Каньон",     "emoji": "🔴"},
+    "white_silence":      {"name": "Белое Безмолвие",    "emoji": "⚪"},
+    "melancholic_swamps": {"name": "Болота Меланхолии",  "emoji": "🌫️"},
+    "guardians_plateau":  {"name": "Плато Стражей",      "emoji": "🗿"},
+    "phantoms_gate":      {"name": "Phantom's Gate",     "emoji": "👻"},
+}
+
+
+def find_location_by_channel_name(channel_name: str) -> str | None:
+    """Ищет ключ локации по имени канала Discord."""
+    if not channel_name:
+        return None
+    low = channel_name.lower().replace("_", "-")
+    for key, data in _LOCATIONS_DATA.items():
+        if key in low:
+            return key
+        ru = data["name"].lower().replace(" ", "-")
+        if ru in low:
+            return key
+    return None
 
 
 # ==========================================================================
@@ -223,7 +261,7 @@ ITEMS: dict[str, dict[str, object]] = {
 
 
 # ==========================================================================
-#  ЛОКАЦИИ — берём из data/locations.py
+#  ЛОКАЦИИ — берём из _LOCATIONS_DATA
 # ==========================================================================
 LOCATION_NAMES: dict[str, str] = {
     key: f"{data['emoji']} {data['name']}"
@@ -486,7 +524,6 @@ def stock_for_location(loc_key: str) -> list[str]:
 
 # ==========================================================================
 #  ОПРЕДЕЛЕНИЕ ЛОКАЦИИ ПО КАНАЛУ
-#  Приоритет: ID из .env → имя канала
 # ==========================================================================
 
 def _load_shop_channels() -> dict[int, str]:
@@ -510,7 +547,7 @@ def _location_by_channel(channel: discord.abc.GuildChannel | None) -> str | None
     """Определяет локацию по каналу.
 
     1. Сначала — по ID из .env (если заданы и совпадают).
-    2. Потом — по имени канала (fallback).
+    2. Потом — по имени канала.
     """
     if channel is None:
         return None
