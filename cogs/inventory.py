@@ -7,6 +7,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from data.locations import LOCATIONS as _LOCATIONS_DATA
+from data.locations import find_location_by_channel_name
 from database import (
     add_item,
     get_item_qty,
@@ -36,14 +38,12 @@ ITEMS: dict[str, dict[str, object]] = {
     "full_heal":      {"name": "Полное лечение",             "price": 600},
     "max_honey":      {"name": "Макс-мёд",                   "price": 2500},
 
-    # ---- Зелья и восстановление ----
     "fresh_water":    {"name": "Свежая вода",                "price": 200},
     "soda_pop":       {"name": "Газировка",                  "price": 300},
     "lemonade":       {"name": "Лимонад",                    "price": 350},
     "moomoo_milk":    {"name": "Молоко Му-Му",               "price": 500},
     "full_restore":   {"name": "Полное восстановление",      "price": 3000},
 
-    # ---- Травы ----
     "energy_powder":  {"name": "Энергопорошок",              "price": 500},
     "energy_root":    {"name": "Энергокорень",               "price": 800},
     "heal_powder":    {"name": "Целебный порошок",           "price": 450},
@@ -63,7 +63,6 @@ ITEMS: dict[str, dict[str, object]] = {
     "quick_ball":     {"name": "Квикбол",                    "price": 400},
     "dusk_ball":      {"name": "Дускбол",                    "price": 180},
 
-    # ---- Новые покеболы ----
     "premier_ball":   {"name": "Премьер-болл",               "price": 100},
     "cherish_ball":   {"name": "Чериш-болл",                 "price": 0},
     "park_ball":      {"name": "Парк-болл",                  "price": 0},
@@ -74,7 +73,6 @@ ITEMS: dict[str, dict[str, object]] = {
     "dream_ball":     {"name": "Дрим-болл",                  "price": 500},
     "beast_ball":     {"name": "Бист-болл",                  "price": 5000},
 
-    # ---- Апокорновые ----
     "level_ball":     {"name": "Левел-болл",                 "price": 250},
     "lure_ball":      {"name": "Люр-болл",                   "price": 250},
     "moon_ball":      {"name": "Мун-болл",                   "price": 250},
@@ -83,7 +81,6 @@ ITEMS: dict[str, dict[str, object]] = {
     "heavy_ball":     {"name": "Хэви-болл",                  "price": 300},
     "fast_ball":      {"name": "Фаст-болл",                  "price": 250},
 
-    # ---- Legends: Arceus ----
     "feather_ball":   {"name": "Фезер-болл",                 "price": 150},
     "wing_ball":      {"name": "Винг-болл",                  "price": 180},
     "jet_ball":       {"name": "Джет-болл",                  "price": 200},
@@ -143,10 +140,8 @@ ITEMS: dict[str, dict[str, object]] = {
     "z_crystal_ghost":    {"name": "Z-кристалл: Призрак",        "price": 25000},
     "z_crystal_psychic":  {"name": "Z-кристалл: Психика",        "price": 25000},
 
-    # ---- Динамакс ----
     "dynamax_band":       {"name": "Динамакс-браслет",           "price": 100000},
 
-    # ---- Усиления ----
     "x_attack":       {"name": "X Атака",                    "price": 500},
     "x_defense":      {"name": "X Защита",                   "price": 500},
     "x_sp_atk":       {"name": "X Спец. Атака",              "price": 500},
@@ -156,7 +151,6 @@ ITEMS: dict[str, dict[str, object]] = {
     "dire_hit":       {"name": "Dire Hit",                   "price": 700},
     "guard_spec":     {"name": "Guard Spec",                 "price": 700},
 
-    # ---- Ягоды ----
     "liechi_berry":   {"name": "Ягода Личи",                 "price": 3000},
     "ganlon_berry":   {"name": "Ягода Ганлон",               "price": 3000},
     "salac_berry":    {"name": "Ягода Салак",                "price": 3000},
@@ -166,7 +160,6 @@ ITEMS: dict[str, dict[str, object]] = {
     "sitrus_berry":   {"name": "Ягода Ситрус",               "price": 800},
     "lum_berry":      {"name": "Ягода Лум",                  "price": 1200},
 
-    # ---- Held items ----
     "choice_band":    {"name": "Choice Band",                "price": 8000},
     "choice_specs":   {"name": "Choice Specs",               "price": 8000},
     "choice_scarf":   {"name": "Choice Scarf",               "price": 8000},
@@ -177,7 +170,6 @@ ITEMS: dict[str, dict[str, object]] = {
     "expert_belt":    {"name": "Expert Belt",                "price": 8000},
     "rocky_helmet":   {"name": "Rocky Helmet",               "price": 7500},
 
-    # ---- Хибики ----
     "bicycle":        {"name": "Велосипед",                  "price": 15000},
     "acro_bike":      {"name": "Акро-велосипед",             "price": 25000},
     "mach_bike":      {"name": "Мах-велосипед",              "price": 25000},
@@ -185,7 +177,6 @@ ITEMS: dict[str, dict[str, object]] = {
     "quick_claw":     {"name": "Quick Claw",                 "price": 6000},
     "quick_powder":   {"name": "Quick Powder",               "price": 5000},
 
-    # ---- Люмьер ----
     "ribbon_pink":     {"name": "Розовая лента",             "price": 800},
     "ribbon_blue":     {"name": "Синяя лента",               "price": 800},
     "ribbon_gold":     {"name": "Золотая лента",             "price": 2500},
@@ -205,7 +196,6 @@ ITEMS: dict[str, dict[str, object]] = {
     "pendant_moon":    {"name": "Кулон-луна",                "price": 2200},
     "pendant_sun":     {"name": "Кулон-солнце",              "price": 2200},
 
-    # ---- Рейгард ----
     "weakness_policy":  {"name": "Weakness Policy",          "price": 9000},
     "protective_pads":  {"name": "Protective Pads",          "price": 8000},
     "loaded_dice":      {"name": "Loaded Dice",              "price": 7500},
@@ -225,31 +215,21 @@ ITEMS: dict[str, dict[str, object]] = {
     "mint_impish":      {"name": "Мятный лист: Импиш",       "price": 10000},
     "mint_careful":     {"name": "Мятный лист: Кэафул",      "price": 10000},
 
-    # ---- Эйдолон ----
     "league_badge":         {"name": "Значок Лиги",          "price": 25000},
     "champion_cape":        {"name": "Плащ чемпиона",        "price": 75000},
     "hall_of_fame_ticket":  {"name": "Билет в Зал славы",    "price": 150000},
     "elite_pass":           {"name": "Пропуск элиты",        "price": 100000},
 }
 
+
 # ==========================================================================
-#  ЛОКАЦИИ
+#  ЛОКАЦИИ — берём из data/locations.py
 # ==========================================================================
 LOCATION_NAMES: dict[str, str] = {
-    "hoshinori": "✨ Хошинори",
-    "lastoris":  "🌊 Ласторис",
-    "verden":    "🌿 Верден",
-    "kaiseki":   "🔥 Кайсэки",
-    "nordkron":  "❄️ Нордкрон",
-    "aurelis":   "⚡ Аурелис",
-    "hibiki":    "🎐 Хибики",
-    "kurokane":  "⚙️ Курокане",
-    "lumier":    "💫 Люмьер",
-    "estera":    "🔮 Эстера",
-    "reigard":   "🐉 Рейгард",
-    "eidolon":   "👻 Эйдолон",
-    "asteris":   "🏛️ Астэрис",
+    key: f"{data['emoji']} {data['name']}"
+    for key, data in _LOCATIONS_DATA.items()
 }
+
 
 # ==========================================================================
 #  АССОРТИМЕНТ ПО ЛОКАЦИЯМ
@@ -504,7 +484,13 @@ def stock_for_location(loc_key: str) -> list[str]:
     return STOCK_BY_LOCATION.get(loc_key, DEFAULT_STOCK)
 
 
+# ==========================================================================
+#  ОПРЕДЕЛЕНИЕ ЛОКАЦИИ ПО КАНАЛУ
+#  Приоритет: ID из .env → имя канала
+# ==========================================================================
+
 def _load_shop_channels() -> dict[int, str]:
+    """ID-режим: переменные SHOP_CHANNEL_<KEY> из .env (если заданы)."""
     mapping: dict[int, str] = {}
     for loc_key in LOCATION_NAMES.keys():
         raw = os.getenv(f"SHOP_CHANNEL_{loc_key.upper()}", "").strip()
@@ -520,8 +506,19 @@ def _load_shop_channels() -> dict[int, str]:
 SHOP_CHANNELS: dict[int, str] = _load_shop_channels()
 
 
-def _location_by_channel(channel_id: int) -> str | None:
-    return SHOP_CHANNELS.get(channel_id)
+def _location_by_channel(channel: discord.abc.GuildChannel | None) -> str | None:
+    """Определяет локацию по каналу.
+
+    1. Сначала — по ID из .env (если заданы и совпадают).
+    2. Потом — по имени канала (fallback).
+    """
+    if channel is None:
+        return None
+
+    if SHOP_CHANNELS and channel.id in SHOP_CHANNELS:
+        return SHOP_CHANNELS[channel.id]
+
+    return find_location_by_channel_name(channel.name)
 
 
 # --------------------------------------------------------------------------- #
@@ -531,7 +528,7 @@ def _location_by_channel(channel_id: int) -> str | None:
 async def _shop_autocomplete(
     interaction: discord.Interaction, current: str
 ) -> list[app_commands.Choice[str]]:
-    loc_key = _location_by_channel(interaction.channel_id or 0)
+    loc_key = _location_by_channel(interaction.channel)
     if loc_key is None:
         return []
     keys = stock_for_location(loc_key)
@@ -554,7 +551,6 @@ async def _shop_autocomplete(
 async def _inventory_autocomplete(
     interaction: discord.Interaction, current: str
 ) -> list[app_commands.Choice[str]]:
-    """Показывает только предметы, которые есть в инвентаре активного профиля."""
     trainer = await get_trainer(interaction.user.id)
     inv: dict[str, int] = trainer.get("inventory", {}) or {}
     cur = current.strip().lower()
@@ -602,7 +598,7 @@ class Inventory(commands.Cog):
 
     @app_commands.command(
         name="shop",
-        description="Магазин (работает только в каналах магазинов)",
+        description="Магазин (работает только в каналах локаций)",
     )
     @app_commands.describe(item="Что купить", quantity="Сколько (1–99)")
     @app_commands.autocomplete(item=_shop_autocomplete)
@@ -612,10 +608,10 @@ class Inventory(commands.Cog):
         item: str,
         quantity: app_commands.Range[int, 1, 99] = 1,
     ) -> None:
-        loc_key = _location_by_channel(interaction.channel_id or 0)
+        loc_key = _location_by_channel(interaction.channel)
         if loc_key is None:
             await interaction.response.send_message(
-                "❌ Магазин доступен только в специальных каналах магазинов.",
+                "❌ Магазин доступен только в каналах локаций.",
                 ephemeral=True,
             )
             return
@@ -683,16 +679,12 @@ class Inventory(commands.Cog):
         name="use",
         description="Использовать предмет (виден всем)",
     )
-    @app_commands.describe(
-        item="Какой предмет использовать (из вашего инвентаря)",
-        profile_id="На какого персонажа (по умолчанию — на активного)",
-    )
+    @app_commands.describe(item="Какой предмет использовать")
     @app_commands.autocomplete(item=_inventory_autocomplete)
     async def use(
         self,
         interaction: discord.Interaction,
         item: str,
-        profile_id: str | None = None,
     ) -> None:
         uid = interaction.user.id
         key = item.strip().lower()
@@ -706,7 +698,6 @@ class Inventory(commands.Cog):
         info = ITEMS[key]
         name = info["name"]
 
-        # Списываем 1 предмет из инвентаря активного персонажа
         taken = await take_item(uid, key, 1)
         if not taken:
             await interaction.response.send_message(
@@ -721,7 +712,6 @@ class Inventory(commands.Cog):
             ),
             color=discord.Color.green(),
         )
-        # Видно всем — не ephemeral
         await interaction.response.send_message(embed=embed)
 
     # ------------------------------------------------------------------ /drop
