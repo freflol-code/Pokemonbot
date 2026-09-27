@@ -14,6 +14,7 @@ log = logging.getLogger(__name__)
 BASE_URL = "https://pokeapi.co/api/v2"
 MAX_POKEMON_ID = 1025
 NAME_INDEX_FILE = "name_index.json"
+MOVE_INDEX_FILE = "move_index_ru.json"
 
 _session: Optional[aiohttp.ClientSession] = None
 _session_lock = asyncio.Lock()
@@ -27,6 +28,11 @@ _name_index_lock = asyncio.Lock()
 _name_index_ready = False
 
 _ability_names_ru: dict[str, str] = {}
+
+# --- индекс русских имён атак (RU → EN) ---
+_move_ru_to_en: dict[str, str] = {}
+_move_index_lock = asyncio.Lock()
+_move_index_ready = False
 
 
 class PokeAPIError(Exception):
@@ -103,7 +109,6 @@ def _process_pokemon_raw(raw: dict[str, Any]) -> dict[str, Any]:
     artwork = ((sprites.get("other") or {}).get("official-artwork") or {}).get(
         "front_default"
     )
-    # Способности: только обычные (не скрытые), первая — основная
     abilities = []
     for a in raw.get("abilities", []) or []:
         abilities.append({
@@ -315,3 +320,92 @@ async def get_ability_ru(ability_name: str) -> str:
 
     _ability_names_ru[key] = ru_name
     return ru_name
+
+
+# --------------------------------------------------------------------------- #
+#                      ИНДЕКС РУССКИХ ИМЁН АТАК                              #
+# --------------------------------------------------------------------------- #
+
+def _norm_move_key(name: str) -> str:
+    """Нормализует имя атаки: нижний регистр, без дефисов, схлопнутые пробелы."""
+    return _normalize(name).replace("-", " ").strip()
+
+
+async def _build_move_index() -> dict[str, str]:
+    log.info("Генерация индекса русских имён атак (30–60 сек)…")
+    index: dict[str, str] = {}
+    session = await _get_session()
+    sem = asyncio.Semaphore(20)
+
+    try:
+        listing = await _fetch_json(f"{BASE_URL}/move?limit=1000")
+    except PokeAPIError:
+        return {}
+
+    results = listing.get("results", []) or []
+
+    async def fetch_one(url: str, name_en: str):
+        async with sem:
+            try:
+                async with session.get(
+                    url, timeout=aiohttp.ClientTimeout(total=20)
+                ) as resp:
+                    if resp.status == 200:
+                        m = await resp.json()
+                        return name_en, m.get("names", []) or []
+            except Exception:
+                pass
+        return None
+
+    tasks = [fetch_one(e["url"], e["name"]) for e in results]
+    done = 0
+    for coro in asyncio.as_completed(tasks):
+        res = await coro
+        done += 1
+        if done % 100 == 0:
+            log.info("Индекс атак: %d/%d", done, len(results))
+        if not res:
+            continue
+        name_en, names = res
+        for n in names:
+            lang = (n.get("language") or {}).get("name")
+            if lang == "ru":
+                ru = (n.get("name") or "").strip()
+                if ru:
+                    index[_norm_move_key(ru)] = name_en
+
+    try:
+        with open(MOVE_INDEX_FILE, "w", encoding="utf-8") as f:
+            json.dump(index, f, ensure_ascii=False)
+        log.info("Индекс атак сохранён (%d записей)", len(index))
+    except OSError as e:
+        log.warning("Не удалось сохранить индекс атак: %s", e)
+    return index
+
+
+async def ensure_move_index() -> dict[str, str]:
+    global _move_ru_to_en, _move_index_ready
+    async with _move_index_lock:
+        if _move_index_ready:
+            return _move_ru_to_en
+        if os.path.exists(MOVE_INDEX_FILE):
+            try:
+                with open(MOVE_INDEX_FILE, encoding="utf-8") as f:
+                    _move_ru_to_en = json.load(f)
+                _move_index_ready = True
+                log.info("Индекс атак загружен: %d записей", len(_move_ru_to_en))
+                return _move_ru_to_en
+            except (OSError, json.JSONDecodeError) as e:
+                log.warning("Не удалось прочитать индекс атак: %s", e)
+        _move_ru_to_en = await _build_move_index()
+        _move_index_ready = True
+        return _move_ru_to_en
+
+
+def resolve_move_name(name: str) -> str:
+    """Если имя русское — ищет английский эквивалент. ASCII проходит как есть."""
+    if not name:
+        return name
+    if name.isascii():
+        return name
+    return _move_ru_to_en.get(_norm_move_key(name), name)
