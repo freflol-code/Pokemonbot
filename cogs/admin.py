@@ -1,5 +1,5 @@
 """Мастерские команды — выдача и редактирование покемонов, деньги, предметы,
-победы/поражения, значки, фикс русских имён атак."""
+победы/поражения, значки, фикс русских имён атак (для одного и для всех)."""
 import logging
 import os
 import uuid
@@ -34,12 +34,14 @@ from database import (
     inc_losses_by_profile,
     inc_wins,
     inc_wins_by_profile,
+    list_all_pokemon_with_moves,
     list_profiles,
     remove_badge_by_profile,
     remove_pokemon,
     remove_pokemon_by_profile,
     update_pokemon,
     update_pokemon_by_profile,
+    update_pokemon_moves_batch,
 )
 from pokeapi_client import PokeAPIError
 from utils import BADGE_EMOJI, BADGE_RU, EMBED_COLOR, format_moves, load_species, mon_title
@@ -984,7 +986,7 @@ class Admin(commands.Cog):
 
     @app_commands.command(
         name="gm_fix_moves",
-        description="[Мастер] Перевести русские атаки в английские slug по словарю",
+        description="[Мастер] Перевести русские атаки в английские slug по словарю (для одного игрока)",
     )
     @app_commands.describe(
         user="Чьи атаки исправить (по умолчанию — у себя)",
@@ -1040,6 +1042,68 @@ class Admin(commands.Cog):
         embed = discord.Embed(
             title="🔧 Fix moves",
             description="\n".join(lines),
+            color=discord.Color.blurple(),
+        )
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    # ------------------------------------------------------------------ /gm_fix_moves_all
+
+    @app_commands.command(
+        name="gm_fix_moves_all",
+        description="[Мастер] Перевести русские атаки в slug сразу у ВСЕХ игроков",
+    )
+    @is_master()
+    async def gm_fix_moves_all(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+
+        all_mons = await list_all_pokemon_with_moves()
+        fixes: dict[str, list[str]] = {}
+        fixed_moves = 0
+        unresolved: set[str] = set()
+        profiles_affected: set[str] = set()
+
+        for mon in all_mons:
+            old = mon["moves"]
+            if not old:
+                continue
+            new: list[str] = []
+            changed = False
+            for m in old:
+                if not isinstance(m, str):
+                    continue
+                if m.isascii():
+                    new.append(m)
+                    continue
+                en = resolve_move_ru(m)
+                if en:
+                    new.append(en)
+                    changed = True
+                    fixed_moves += 1
+                else:
+                    new.append(m)
+                    unresolved.add(m)
+            if changed:
+                fixes[mon["instance_id"]] = new
+                profiles_affected.add(mon["profile_id"])
+
+        updated = await update_pokemon_moves_batch(fixes)
+
+        lines = [
+            f"**Профилей затронуто:** {len(profiles_affected)}",
+            f"**Покемонов обновлено:** {updated}",
+            f"**Атак переведено:** {fixed_moves}",
+        ]
+        if unresolved:
+            uniq = sorted(unresolved)
+            lines.append("")
+            lines.append(f"⚠️ **Не распознано ({len(uniq)}):**")
+            lines.append(", ".join(f"`{m}`" for m in uniq[:30]))
+            if len(uniq) > 30:
+                lines.append(f"…и ещё {len(uniq) - 30}")
+
+        embed = discord.Embed(
+            title="🔧 Fix moves — все игроки",
+            description="\n".join(lines)[:4000],
             color=discord.Color.blurple(),
         )
         await interaction.followup.send(embed=embed, ephemeral=True)
