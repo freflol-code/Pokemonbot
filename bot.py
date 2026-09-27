@@ -28,6 +28,7 @@ EXTENSIONS = [
     "cogs.dice",
     "cogs.catch",
     "cogs.spawn",
+    "cogs.battle",
 ]
 
 
