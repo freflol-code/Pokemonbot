@@ -1,4 +1,5 @@
-"""Справочники боевой системы: типы, стадии, характеры, погода, статусные атаки, приоритеты."""
+"""Справочники боевой системы: типы, стадии, характеры, погода, статусы,
+приоритеты, способности, pivot-атаки, крит-стадии."""
 from __future__ import annotations
 
 
@@ -140,15 +141,22 @@ STATUS_EMOJI = {
     "freeze": "❄️",
     "confused": "🌀",
     "infatuated": "💗",
+    "leech_seed": "🌱",
+    "taunt": "😤",
+    "encore": "🎵",
+    "disable": "🚫",
+    "substitute": "🎭",
+    "flash_fire": "🔥",
 }
 
-# Летальные статусы (не могут быть вылечены Antidote и т.п.)
+# Бонусы к поимке
 STATUS_BONUS_CATCH = {
     "sleep": 2.5,
     "freeze": 2.5,
     "paralysis": 1.5,
     "burn": 1.5,
     "poison": 1.5,
+    "badly_poison": 1.5,
     "none": 1.0,
 }
 
@@ -218,7 +226,6 @@ WEATHER_DURATION_EXTENDED = 8
 
 # ==========================================================================
 #  ПРИОРИТЕТЫ АТАК
-#  Ключ: raw_name из PokéAPI → приоритет (число). Больше = раньше.
 # ==========================================================================
 MOVE_PRIORITY: dict[str, int] = {
     # +5
@@ -241,7 +248,6 @@ MOVE_PRIORITY: dict[str, int] = {
     "crafty-shield": 3,
     # +2
     "fake-out": 2,
-    "quick-guard": 2,
     "extreme-speed": 2,
     "feint": 2,
     # +1
@@ -256,7 +262,7 @@ MOVE_PRIORITY: dict[str, int] = {
     "sucker-punch": 1,
     "vacuum-wave": 1,
     "water-shuriken": 1,
-    # -1 .. -7 (пониженный приоритет)
+    # -1 .. -7
     "avalanche": -4,
     "beak-blast": -3,
     "counter": -5,
@@ -267,7 +273,6 @@ MOVE_PRIORITY: dict[str, int] = {
     "shell-trap": -3,
     "whirlwind": -6,
     "circle-throw": -6,
-    "dragon-tail": -6,
     "vital-throw": -1,
     "trick-room": -7,
 }
@@ -279,22 +284,16 @@ def get_move_priority(raw_name: str) -> int:
 
 
 # ==========================================================================
-#  СТАТУСНЫЕ АТАКИ (STATUS MOVES)
-#  Формат: raw_name → { category, target, status, stat, stages, chance }
-#  - category: "inflict" | "boost" | "debuff" | "heal"
-#  - target: "self" | "opponent"
-#  - status: burn/poison/paralysis/sleep/freeze/confused/infatuated
-#  - stat: attack/defense/sp_attack/sp_defense/speed/accuracy/evasion
-#  - stages: +N или -N
-#  - chance: 0..1 (для атак с шансом)
+#  СТАТУСНЫЕ АТАКИ
 # ==========================================================================
 STATUS_MOVES: dict[str, dict] = {
     # -------------------- Наложение статусов --------------------
     "will-o-wisp":   {"category": "inflict", "target": "opponent", "status": "burn",      "accuracy": 85},
-    "toxic":         {"category": "inflict", "target": "opponent", "status": "poison",    "accuracy": 90},
+    "toxic":         {"category": "inflict", "target": "opponent", "status": "badly_poison", "accuracy": 90},
     "poison-powder": {"category": "inflict", "target": "opponent", "status": "poison",    "accuracy": 75},
     "thunder-wave":  {"category": "inflict", "target": "opponent", "status": "paralysis", "accuracy": 90},
     "glare":         {"category": "inflict", "target": "opponent", "status": "paralysis", "accuracy": 100},
+    "stun-spore":    {"category": "inflict", "target": "opponent", "status": "paralysis", "accuracy": 75},
     "sleep-powder":  {"category": "inflict", "target": "opponent", "status": "sleep",     "accuracy": 75},
     "spore":         {"category": "inflict", "target": "opponent", "status": "sleep",     "accuracy": 100},
     "hypnosis":      {"category": "inflict", "target": "opponent", "status": "sleep",     "accuracy": 60},
@@ -304,6 +303,13 @@ STATUS_MOVES: dict[str, dict] = {
     "sweet-kiss":    {"category": "inflict", "target": "opponent", "status": "confused",  "accuracy": 75},
     "teeter-dance":  {"category": "inflict", "target": "opponent", "status": "confused",  "accuracy": 100},
     "attract":       {"category": "inflict", "target": "opponent", "status": "infatuated","accuracy": 100},
+
+    # -------------------- Волатильные статусы --------------------
+    "substitute":    {"category": "substitute", "target": "self",     "fraction": 4,   "accuracy": None},
+    "leech-seed":    {"category": "leech_seed", "target": "opponent", "accuracy": 90},
+    "taunt":         {"category": "taunt",      "target": "opponent", "accuracy": 100, "turns": 3},
+    "encore":        {"category": "encore",     "target": "opponent", "accuracy": 100, "turns": 3},
+    "disable":       {"category": "disable",    "target": "opponent", "accuracy": 100, "turns": 4},
 
     # -------------------- Повышение статов (self) --------------------
     "swords-dance":  {"category": "boost", "target": "self", "stat": "attack",     "stages": 2, "accuracy": None},
@@ -335,6 +341,8 @@ STATUS_MOVES: dict[str, dict] = {
     "flash":         {"category": "debuff", "target": "opponent", "stat": "accuracy",   "stages": -1, "accuracy": 100},
     "sand-attack":   {"category": "debuff", "target": "opponent", "stat": "accuracy",   "stages": -1, "accuracy": 100},
     "smokescreen":   {"category": "debuff", "target": "opponent", "stat": "accuracy",   "stages": -1, "accuracy": 100},
+    "metal-sound":   {"category": "debuff", "target": "opponent", "stat": "sp_defense", "stages": -2, "accuracy": 85},
+    "fake-tears":    {"category": "debuff", "target": "opponent", "stat": "sp_defense", "stages": -2, "accuracy": 100},
 
     # -------------------- Лечение --------------------
     "recover":       {"category": "heal", "target": "self", "fraction": 2,   "accuracy": None},
@@ -358,3 +366,224 @@ def is_status_move(raw_name: str) -> bool:
 
 def get_status_move(raw_name: str) -> dict | None:
     return STATUS_MOVES.get(raw_name.lower().replace(" ", "-").strip())
+
+
+# ==========================================================================
+#  ПЕРЕХОДЯЩИЕ И PIVOT-АТАКИ
+# ==========================================================================
+# Baton Pass — переносит стадии статов и волатильные статусы следующему покемону
+BATON_PASS_MOVES: set[str] = {"baton-pass"}
+
+# Pivot-атаки: наносят урон и затем форсируют смену (не переносят стадии)
+PIVOT_MOVES: set[str] = {
+    "u-turn", "volt-switch", "flip-turn",
+    "parting-shot", "teleport",
+}
+
+
+def is_baton_pass(raw_name: str) -> bool:
+    return raw_name.lower().replace(" ", "-").strip() in BATON_PASS_MOVES
+
+
+def is_pivot_move(raw_name: str) -> bool:
+    return raw_name.lower().replace(" ", "-").strip() in PIVOT_MOVES
+
+
+# ==========================================================================
+#  КРИТИЧЕСКИЕ АТАКИ (HIGH CRIT RATIO)
+# ==========================================================================
+HIGH_CRIT_MOVES: set[str] = {
+    "slash", "night-slash", "cross-chop", "stone-edge", "leaf-blade",
+    "psycho-cut", "shadow-claw", "razor-wind", "crabhammer", "karate-chop",
+    "razor-leaf", "sky-attack", "air-cutter", "attack-order", "blaze-kick",
+    "cross-poison", "drill-run", "spacial-rend", "snipe-shot", "aeroblast",
+    "sacred-fire", "origin-pulse", "precipice-blades", "dragon-claw",
+    "leaf-blade", "poison-tail", "shadow-blast", "sunny-day-snipe",
+    "wicked-blow", "flowertrick", "espathra", "mighty-cleave",
+}
+
+
+def get_crit_stage(raw_name: str, extra: int = 0) -> int:
+    """Возвращает стадию крита с учётом high-crit атак и бонусов предметов/способностей."""
+    stage = extra
+    if raw_name.lower().replace(" ", "-").strip() in HIGH_CRIT_MOVES:
+        stage += 1
+    return max(0, min(4, stage))
+
+
+# Шансы крита по стадиям (Gen VI+)
+CRIT_CHANCES: dict[int, float] = {
+    0: 1 / 24,
+    1: 1 / 8,
+    2: 1 / 2,
+    3: 1.0,
+    4: 1.0,
+}
+
+
+# ==========================================================================
+#  СПОСОБНОСТИ: ИММУНИТЕТЫ К ТИПАМ
+# ==========================================================================
+# Формат: ability → (тип, эффект)
+#   effect = "immune"  — полный иммунитет
+#   effect = "heal"    — иммунитет + лечение 1/4 макс HP
+#   effect = "boost"   — иммунитет + повышение стата (см. ABILITY_IMMUNITY_BOOST)
+ABILITY_TYPE_IMMUNITY: dict[str, tuple[str, str]] = {
+    "levitate":        ("ground", "immune"),
+    "volt-absorb":     ("electric", "heal"),
+    "water-absorb":    ("water", "heal"),
+    "dry-skin":        ("water", "heal"),
+    "earth-eater":     ("ground", "heal"),
+    "flash-fire":      ("fire", "boost"),
+    "sap-sipper":      ("grass", "boost"),
+    "lightning-rod":   ("electric", "boost"),
+    "storm-drain":     ("water", "boost"),
+    "motor-drive":     ("electric", "boost"),
+    "well-baked-body": ("fire", "boost"),
+    "wind-rider":      ("flying", "boost"),
+    "thermal-exchange": ("fire", "boost"),
+}
+
+# Какой стат поднимается при "boost"-иммунитете
+ABILITY_IMMUNITY_BOOST: dict[str, str] = {
+    "flash-fire":      "sp_attack",
+    "sap-sipper":      "attack",
+    "lightning-rod":   "sp_attack",
+    "storm-drain":     "sp_attack",
+    "motor-drive":     "speed",
+    "well-baked-body": "defense",
+    "wind-rider":      "attack",
+    "thermal-exchange": "attack",
+}
+
+# Какой стат поднимается (persisting) — для flash-fire, чтобы он усиливал огонь
+ABILITY_PERSISTING_BOOST: dict[str, str] = {
+    "flash-fire": "flash_fire",  # сохраняется до конца боя, усиливает Fire-атаки
+}
+
+
+# ==========================================================================
+#  СПОСОБНОСТИ: МОДИФИКАТОРЫ УРОНА
+# ==========================================================================
+# Множители атаки (применяются к attacker.stats["attack"] / sp_attack)
+ABILITY_ATTACK_MULT: dict[str, float] = {
+    "huge-power": 2.0,
+    "pure-power": 2.0,
+    "guts":       1.5,   # если есть статус
+    "hustle":     1.5,
+    "toxic-boost": 1.5,  # если badly_poison
+    "flare-boost": 1.5,  # если burn
+}
+
+# Множители защиты
+ABILITY_DEFENSE_MULT: dict[str, float] = {
+    "marvel-scale": 1.5,  # если есть статус
+    "grass-pelt":   1.5,  # в sun — упрощённо всегда
+    "fur-coat":     2.0,
+}
+
+# Множители урона (применяются к финальному dmg)
+ABILITY_DAMAGE_TAKEN_MULT: dict[str, dict[str, float]] = {
+    # ability → {тип_атаки: множитель}
+    "thick-fat":   {"fire": 0.5, "ice": 0.5},
+    "heatproof":   {"fire": 0.5},
+    "water-bubble": {"fire": 0.5},
+    "purifying-salt": {"ghost": 0.5},
+    "fluffy":      {"fire": 2.0},   # контактный урон — не отслеживаем, только fire
+    "ice-scales":  {"special": 0.5},  # особый — упрощение
+}
+
+# Универсальные модификаторы исходящего урона
+ABILITY_OUTGOING_MULT: dict[str, float] = {
+    "adaptability": 1.0,   # STAB 2.0 вместо 1.5 — обрабатывается отдельно
+    "tinted-lens":  2.0,   # если множитель < 1
+    "filter":       0.75,  # если множитель > 1 (применяется к входящему)
+    "solid-rock":   0.75,
+    "prism-armor":  0.75,
+    "technician":   1.5,   # если power <= 60
+    "sheer-force":  1.3,   # если у атаки есть вторичный эффект — упрощённо 1.0
+}
+
+
+# ==========================================================================
+#  СПОСОБНОСТИ: ОСОБЫЕ ЭФФЕКТЫ
+# ==========================================================================
+# Способности, дающие устойчивость к 1 HP на полном HP
+STURDY_ABILITIES = {"sturdy"}
+
+# Способности, уменьшающие урон вдвое при полном HP
+HALVE_AT_FULL_HP = {"multiscale", "shadow-shield"}
+
+# Способности, дающие иммунитет к непрямому урону (погода, ожог, яд, leech seed)
+INDIRECT_DAMAGE_IMMUNE = {"magic-guard"}
+
+# Способности, дающие иммунитет к погоде (sand/snow)
+WEATHER_IMMUNE = {"overcoat", "sand-veil", "sand-rush", "snow-cloak", "ice-body"}
+
+# Способности, лечащие в конце хода (в зависимости от погоды)
+END_OF_TURN_ABILITIES: dict[str, dict] = {
+    "rain-dish":    {"weather": "rain",  "fraction": 16},
+    "ice-body":     {"weather": "snow",  "fraction": 16},
+    "dry-skin":     {"weather": "rain",  "fraction": 8, "hurt_sunny": True},
+    "solar-power":  {"hurt_weather": "sunny", "fraction": 8, "boost": "sp_attack"},
+}
+
+# Способности, повышающие стат каждый ход
+END_TURN_BOOST_ABILITIES: dict[str, str] = {
+    "speed-boost": "speed",
+    "moody": "random",  # упрощённо — случайный стат
+}
+
+# Способности, лечащие при смене
+SWITCH_HEAL_ABILITIES: dict[str, float] = {
+    "regenerator": 1 / 3,  # лечит 1/3 HP при смене
+}
+
+# Способности, снимающие статус при смене
+SWITCH_CURE_ABILITIES = {"natural-cure"}
+
+# Wonderguard — иммунитет ко всему, кроме суперэффективного
+WONDER_GUARD = "wonder-guard"
+
+
+# ==========================================================================
+#  ХЕЛПЕРЫ ДЛЯ СПОСОБНОСТЕЙ
+# ==========================================================================
+def get_type_immunity(ability: str) -> tuple[str, str] | None:
+    """Возвращает (тип, эффект) или None."""
+    return ABILITY_TYPE_IMMUNITY.get((ability or "").lower())
+
+
+def get_attack_mult(ability: str, has_status: bool, status: str) -> float:
+    """Множитель атаки от способности."""
+    ab = (ability or "").lower()
+    if ab not in ABILITY_ATTACK_MULT:
+        return 1.0
+    if ab == "guts" and not has_status:
+        return 1.0
+    if ab == "toxic-boost" and status != "badly_poison":
+        return 1.0
+    if ab == "flare-boost" and status != "burn":
+        return 1.0
+    return ABILITY_ATTACK_MULT[ab]
+
+
+def get_defense_mult(ability: str, has_status: bool) -> float:
+    ab = (ability or "").lower()
+    if ab not in ABILITY_DEFENSE_MULT:
+        return 1.0
+    if ab == "marvel-scale" and not has_status:
+        return 1.0
+    return ABILITY_DEFENSE_MULT[ab]
+
+
+def get_damage_taken_mult(ability: str, move_type: str, damage_class: str) -> float:
+    ab = (ability or "").lower()
+    row = ABILITY_DAMAGE_TAKEN_MULT.get(ab)
+    if not row:
+        return 1.0
+    if move_type in row:
+        return row[move_type]
+    if damage_class in row:
+        return row[damage_class]
+    return 1.0
