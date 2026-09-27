@@ -1,10 +1,19 @@
-"""Движок боя: состояние покемона, урон, статусы, поле, полевые эффекты."""
+"""Движок боя: покемон, урон, статусы, поле, погода."""
 from __future__ import annotations
 
 import random
 from typing import Any, Optional
 
 from battle_data import (
+    WEATHER_ABILITIES,
+    WEATHER_ACCURACY_MULT,
+    WEATHER_DAMAGE_MULT,
+    WEATHER_DURATION_DEFAULT,
+    WEATHER_DURATION_EXTENDED,
+    WEATHER_LABEL,
+    WEATHER_MOVES,
+    WEATHER_ROCKS,
+    WEATHER_TICK_DAMAGE,
     damage_label,
     get_type_multiplier,
     nature_multiplier,
@@ -22,6 +31,7 @@ class BattlePokemon:
         self.species_name: str = data.get("name", "?")
         self.types: list[str] = data.get("types", [])
         self.ability: Optional[str] = data.get("ability")
+        self.item: Optional[str] = data.get("item")
         self.level: int = max(1, min(100, level))
         self.nature: str = (nature or "hardy").lower()
         self.moves: list[dict] = moves
@@ -46,8 +56,8 @@ class BattlePokemon:
             "sp_defense": 0, "speed": 0,
             "accuracy": 0, "evasion": 0,
         }
-        self.protect: bool = False   # активен ли Protect в этом ходу
-        self.flinched: bool = False  # пропуск хода
+        self.protect: bool = False
+        self.flinched: bool = False
 
     # ------------------------------------------------------------------ #
     def _calc_hp(self, base: int) -> int:
@@ -76,6 +86,18 @@ class BattlePokemon:
     def stage_value(self, key: str) -> float:
         return stage_mult(self.stages.get(key, 0))
 
+    def effective_speed(self, weather: "WeatherField") -> int:
+        base = self.stats["speed"] * self.stage_value("speed")
+        if (self.ability or "").lower() == "swift-swim" and weather.kind == "rain":
+            base *= 2
+        if (self.ability or "").lower() == "chlorophyll" and weather.kind == "sunny":
+            base *= 2
+        if (self.ability or "").lower() == "sand-rush" and weather.kind == "sandstorm":
+            base *= 2
+        if (self.ability or "").lower() == "slush-rush" and weather.kind == "snow":
+            base *= 2
+        return int(base)
+
     def reset_stages(self) -> None:
         for k in self.stages:
             self.stages[k] = 0
@@ -93,6 +115,7 @@ class BattlePokemon:
             "stages": dict(self.stages),
             "sprite": self.sprite,
             "ability": self.ability,
+            "item": self.item,
             "gender": self.gender,
         }
 
@@ -105,8 +128,8 @@ class SideField:
         self.reflect: int = 0
         self.light_screen: int = 0
         self.tailwind: int = 0
-        self.spikes: int = 0            # 0-3
-        self.toxic_spikes: int = 0      # 0-2
+        self.spikes: int = 0
+        self.toxic_spikes: int = 0
         self.stealth_rock: bool = False
         self.sticky_web: bool = False
 
@@ -136,10 +159,41 @@ class SideField:
 
 
 # ==========================================================================
-#  ПОЛЕВЫЕ ЭФФЕКТЫ — распознавание и применение
+#  ПОГОДА
 # ==========================================================================
+class WeatherField:
+    def __init__(self) -> None:
+        self.kind: str = "none"
+        self.turns: int = 0
 
-# Названия в PokéAPI, которые мы считаем «полевыми»
+    def set(self, kind: str, *, extended: bool = False) -> None:
+        self.kind = kind
+        self.turns = WEATHER_DURATION_EXTENDED if extended else WEATHER_DURATION_DEFAULT
+
+    def tick(self) -> None:
+        if self.turns > 0:
+            self.turns -= 1
+            if self.turns <= 0:
+                self.kind = "none"
+
+    @property
+    def label(self) -> str:
+        return WEATHER_LABEL.get(self.kind, self.kind)
+
+    def damage_mult(self, move_type: str) -> float:
+        return WEATHER_DAMAGE_MULT.get(self.kind, {}).get(move_type, 1.0)
+
+    def accuracy_override(self, move_name: str) -> Optional[int]:
+        """Возвращает 100 если атака всегда попадает в этой погоде."""
+        low = move_name.lower().replace(" ", "-")
+        if low in WEATHER_ACCURACY_MULT.get(self.kind, {}):
+            return 100
+        return None
+
+
+# ==========================================================================
+#  ПОЛЕВЫЕ ЭФФЕКТЫ
+# ==========================================================================
 FIELD_MOVES = {
     "reflect":            "reflect",
     "light screen":       "light_screen",
@@ -151,7 +205,6 @@ FIELD_MOVES = {
     "protect":            "protect",
 }
 
-# Продолжительность (ходов)
 FIELD_DURATION = {
     "reflect":      5,
     "light_screen": 5,
@@ -160,75 +213,59 @@ FIELD_DURATION = {
 
 
 def is_field_move(move_name: str) -> Optional[str]:
-    """Возвращает ключ полевого эффекта или None."""
     low = move_name.lower().replace("-", " ").strip()
     return FIELD_MOVES.get(low)
 
 
-def apply_field_move(
-    effect_key: str,
-    side: SideField,
-    *,
-    target_side: Optional[SideField] = None,
-) -> str:
-    """Применяет полевой эффект. Возвращает строку для лога."""
+def is_weather_move(move_name: str) -> Optional[str]:
+    low = move_name.lower().replace(" ", "-").strip()
+    return WEATHER_MOVES.get(low)
+
+
+def apply_field_move(effect_key: str, side: SideField) -> str:
     if effect_key == "reflect":
         side.reflect = FIELD_DURATION["reflect"]
         return "🛡️ На стороне появился **Reflect** (5 ходов)."
-
     if effect_key == "light_screen":
         side.light_screen = FIELD_DURATION["light_screen"]
         return "✨ На стороне появился **Light Screen** (5 ходов)."
-
     if effect_key == "tailwind":
         side.tailwind = FIELD_DURATION["tailwind"]
         return "💨 **Tailwind** ускоряет союзников (4 хода)."
-
     if effect_key == "spikes":
         if side.spikes < 3:
             side.spikes += 1
             return f"🌵 На поле соперника **Spikes** ×{side.spikes}."
         return "🌵 Spikes уже на максимуме (×3)."
-
     if effect_key == "toxic_spikes":
         if side.toxic_spikes < 2:
             side.toxic_spikes += 1
             return f"☠️ На поле соперника **Toxic Spikes** ×{side.toxic_spikes}."
         return "☠️ Toxic Spikes уже на максимуме (×2)."
-
     if effect_key == "stealth_rock":
         side.stealth_rock = True
         return "🪨 На поле соперника **Stealth Rock**."
-
     if effect_key == "sticky_web":
         side.sticky_web = True
         return "🕸️ На поле соперника **Sticky Web**."
-
     return ""
 
 
-def apply_switch_in_hazards(
-    mon: BattlePokemon,
-    field: SideField,
-) -> list[str]:
-    """Применяет урон/эффекты от шипов при появлении покемона."""
+def apply_switch_in_hazards(mon: BattlePokemon, field: SideField) -> list[str]:
     lines: list[str] = []
 
     if field.stealth_rock:
-        # Урон: 1/8, 1/4, 1/2 от типа
-        from battle_data import TYPE_CHART
         mult = 1.0
         for t in mon.types:
-            if t == "fire" or t == "flying" or t == "bug" or t == "ice":
+            if t in ("fire", "flying", "bug", "ice"):
                 mult *= 2
-            elif t == "fighting" or t == "ground" or t == "steel":
+            elif t in ("fighting", "ground", "steel"):
                 mult *= 2
         dmg = max(1, int(mon.max_hp * mult / 8))
         mon.take_damage(dmg)
         lines.append(f"🪨 **{mon.name}** ранен осколками Stealth Rock (−{dmg} HP).")
 
     if field.spikes > 0:
-        # Урон: 1/8, 1/6, 1/4 от max HP
         parts = {1: 8, 2: 6, 3: 4}
         dmg = max(1, mon.max_hp // parts.get(field.spikes, 8))
         mon.take_damage(dmg)
@@ -237,19 +274,12 @@ def apply_switch_in_hazards(
         )
 
     if field.toxic_spikes > 0 and mon.status == "none":
-        # Покемоны Poison/Steel/Flying иммунны
-        if "poison" in mon.types or "steel" in mon.types or "flying" in mon.types:
-            pass
-        elif field.toxic_spikes >= 2:
-            mon.status = "poison"
-            lines.append(f"☠️ **{mon.name}** отравлен Toxic Spikes.")
-        else:
+        if not ("poison" in mon.types or "steel" in mon.types or "flying" in mon.types):
             mon.status = "poison"
             lines.append(f"☠️ **{mon.name}** отравлен Toxic Spikes.")
 
     if field.sticky_web:
-        # Замедление: −1 speed
-        if "flying" not in mon.types and "levitate" != (mon.ability or "").lower():
+        if "flying" not in mon.types and (mon.ability or "").lower() != "levitate":
             mon.stages["speed"] = max(-6, mon.stages["speed"] - 1)
             lines.append(f"🕸️ **{mon.name}** замедлен Sticky Web (−1 Speed).")
 
@@ -266,6 +296,7 @@ def calc_damage(
     *,
     defender_side: SideField,
     attacker_side: SideField,
+    weather: WeatherField,
     crit: bool = False,
 ) -> dict:
     power = int(move.get("power") or 0)
@@ -293,21 +324,19 @@ def calc_damage(
     if mult == 0:
         return {"dmg": 0, "mult": 0, "crit": crit}
 
-    # Способность Levitate — иммунитет к Ground
-    if (
-        move_type == "ground"
-        and (defender.ability or "").lower() == "levitate"
-    ):
+    if move_type == "ground" and (defender.ability or "").lower() == "levitate":
         return {"dmg": 0, "mult": 0, "crit": crit}
 
     stab = 1.5 if move_type in attacker.types else 1.0
+    weather_mult = weather.damage_mult(move_type)
 
+    # Защита от песка: Rock получает больше SP DEF (уже не критично)
     base = (
         ((2 * attacker.level / 5 + 2) * power * atk / dfn) / 50
     ) + 2
 
     rand = random.uniform(0.85, 1.0)
-    dmg = int(base * mult * stab * rand)
+    dmg = int(base * mult * stab * weather_mult * rand)
 
     return {"dmg": max(1, dmg), "mult": mult, "crit": crit}
 
@@ -316,8 +345,11 @@ def accuracy_check(
     attacker: BattlePokemon,
     defender: BattlePokemon,
     move: dict,
+    weather: WeatherField,
 ) -> tuple[bool, float]:
-    acc = move.get("accuracy")
+    # Погодные override
+    override = weather.accuracy_override(move["name"])
+    acc = move.get("accuracy") if override is None else override
     if acc is None:
         return True, 1.0
     acc_pct = float(acc) / 100.0
@@ -333,46 +365,74 @@ def crit_check(stage: int = 0) -> bool:
 
 
 # ==========================================================================
-#  СПОСОБНОСТИ (пассивные, срабатывают при появлении/в бою)
+#  СПОСОБНОСТИ
 # ==========================================================================
 def on_switch_in_ability(mon: BattlePokemon) -> list[str]:
-    """Способности, срабатывающие при выходе на поле. Возвращает лог."""
     lines: list[str] = []
     ability = (mon.ability or "").lower()
     if ability == "intimidate":
         lines.append(f"⚡ **{mon.name}** запугивает соперника — Intimidate.")
-    if ability == "drought":
-        lines.append(f"☀️ **{mon.name}** вызывает засуху — Drought.")
-    if ability == "drizzle":
-        lines.append(f"🌧️ **{mon.name}** вызывает дождь — Drizzle.")
-    if ability == "sand-stream":
-        lines.append(f"🏜️ **{mon.name}** поднимает песчаную бурю — Sand Stream.")
-    if ability == "snow-warning":
-        lines.append(f"❄️ **{mon.name}** вызывает снег — Snow Warning.")
     return lines
 
 
+def ability_weather_on_switch(mon: BattlePokemon) -> Optional[str]:
+    """Возвращает погоду, которую вызывает способность."""
+    return WEATHER_ABILITIES.get((mon.ability or "").lower())
+
+
 def apply_intimidate(target: BattlePokemon) -> str:
-    """Понижает атаку цели на 1 стадию."""
     target.stages["attack"] = max(-6, target.stages["attack"] - 1)
     return f"⚡ Атака **{target.name}** понижена (Intimidate)."
 
 
 # ==========================================================================
-#  ОБРАБОТКА СТАТУСОВ
+#  СТАТУСЫ + ПОГОДА В КОНЦЕ ХОДА
 # ==========================================================================
-def apply_end_of_turn(mon: BattlePokemon) -> Optional[dict]:
+def apply_end_of_turn(
+    mon: BattlePokemon, weather: WeatherField
+) -> list[dict]:
+    """Возвращает список событий за конец хода."""
+    events: list[dict] = []
     if mon.fainted:
-        return None
+        return events
 
+    # Статусы
     if mon.status == "burn":
         dmg = max(1, mon.max_hp // 16)
         mon.take_damage(dmg)
-        return {"type": "tick_burn", "dmg": dmg}
+        events.append({"type": "tick_burn", "dmg": dmg})
 
-    if mon.status == "poison":
+    elif mon.status == "poison":
         dmg = max(1, mon.max_hp // 8)
         mon.take_damage(dmg)
-        return {"type": "tick_poison", "dmg": dmg}
+        events.append({"type": "tick_poison", "dmg": dmg})
 
-    return None
+    # Погода
+    config = WEATHER_TICK_DAMAGE.get(weather.kind)
+    if config and not mon.fainted:
+        immune = config.get("immune_types", [])
+        if not any(t in immune for t in mon.types):
+            # Magic Guard / Overcoat иммунитет
+            ability = (mon.ability or "").lower()
+            if ability not in ("magic-guard", "overcoat", "sand-veil", "sand-rush",
+                               "snow-cloak", "ice-body"):
+                frac = config.get("fraction", 16)
+                dmg = max(1, mon.max_hp // frac)
+                mon.take_damage(dmg)
+                events.append({
+                    "type": "tick_weather",
+                    "dmg": dmg,
+                    "kind": weather.kind,
+                })
+        # Ice Body / Rain Dish / Dry Skin — лечат
+        ability = (mon.ability or "").lower()
+        if ability == "ice-body" and weather.kind == "snow":
+            healed = mon.heal(max(1, mon.max_hp // 16))
+            if healed:
+                events.append({"type": "heal_weather", "hp": healed, "kind": weather.kind})
+        elif ability == "rain-dish" and weather.kind == "rain":
+            healed = mon.heal(max(1, mon.max_hp // 16))
+            if healed:
+                events.append({"type": "heal_weather", "hp": healed, "kind": weather.kind})
+
+    return events
