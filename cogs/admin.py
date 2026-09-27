@@ -1,4 +1,5 @@
-"""Мастерские команды — выдача и редактирование покемонов, деньги, предметы, победы/поражения, значки."""
+"""Мастерские команды — выдача и редактирование покемонов, деньги, предметы,
+победы/поражения, значки, фикс русских имён атак."""
 import logging
 import os
 import uuid
@@ -9,6 +10,7 @@ from discord import app_commands
 from discord.ext import commands
 
 import pokeapi_client
+from battle_data import resolve_move_ru
 from database import (
     BADGE_TYPES,
     MAX_PARTY_SIZE,
@@ -129,7 +131,6 @@ async def _species_autocomplete(
 async def _profile_autocomplete(
     interaction: discord.Interaction, current: str
 ):
-    """Подсказывает профили выбранного игрока."""
     user: Optional[discord.Member] = interaction.namespace.user
     if user is None:
         return []
@@ -978,6 +979,70 @@ class Admin(commands.Cog):
         await interaction.response.send_message(
             f"✅ Пол покемона `{iid}` → **{gender.name}**.", ephemeral=True
         )
+
+    # ------------------------------------------------------------------ /gm_fix_moves
+
+    @app_commands.command(
+        name="gm_fix_moves",
+        description="[Мастер] Перевести русские атаки в английские slug по словарю",
+    )
+    @app_commands.describe(
+        user="Чьи атаки исправить (по умолчанию — у себя)",
+    )
+    @is_master()
+    async def gm_fix_moves(
+        self,
+        interaction: discord.Interaction,
+        user: Optional[discord.Member] = None,
+    ) -> None:
+        await interaction.response.defer(ephemeral=True)
+        target = user or interaction.user
+        t = await get_trainer(target.id)
+
+        fixed_total = 0
+        fixed_moves = 0
+        unresolved: list[str] = []
+
+        for mon in t["party"] + t["pc"]:
+            old = list(mon.get("moves") or [])
+            if not old:
+                continue
+            new: list[str] = []
+            changed = False
+            for m in old:
+                if m.isascii():
+                    new.append(m)
+                    continue
+                en = resolve_move_ru(m)
+                if en:
+                    new.append(en)
+                    changed = True
+                    fixed_moves += 1
+                else:
+                    new.append(m)
+                    unresolved.append(f"**{m}** (у `{mon['instance_id']}`)")
+
+            if changed:
+                await update_pokemon(target.id, mon["instance_id"], moves=new)
+                fixed_total += 1
+
+        lines = [
+            f"**Игрок:** {target.mention}",
+            f"**Обновлено покемонов:** {fixed_total}",
+            f"**Атак переведено:** {fixed_moves}",
+        ]
+        if unresolved:
+            uniq = sorted(set(unresolved))
+            lines.append("")
+            lines.append("⚠️ **Не найдено в словаре:**")
+            lines.append("\n".join(uniq[:20]))
+
+        embed = discord.Embed(
+            title="🔧 Fix moves",
+            description="\n".join(lines),
+            color=discord.Color.blurple(),
+        )
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 async def setup(bot: commands.Bot) -> None:
