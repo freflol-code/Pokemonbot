@@ -48,13 +48,20 @@ class BattlePokemon:
             "speed":      self._calc_stat(stats_base.get("speed", 60), "speed"),
         }
 
+        # Основной статус (один за раз)
         self.status: str = "none"
         self.status_counter: int = 0
+
+        # Волатильные статусы (конфуз, влюблённость) — можно совмещать
+        self.volatile: dict[str, int] = {}
+
+        # Стадии статов
         self.stages: dict[str, int] = {
             "attack": 0, "defense": 0, "sp_attack": 0,
             "sp_defense": 0, "speed": 0,
             "accuracy": 0, "evasion": 0,
         }
+
         self.protect: bool = False
         self.flinched: bool = False
 
@@ -97,6 +104,7 @@ class BattlePokemon:
             "hp": self.hp,
             "max_hp": self.max_hp,
             "status": self.status,
+            "volatile": dict(self.volatile),
             "stages": dict(self.stages),
             "sprite": self.sprite,
             "ability": self.ability,
@@ -470,12 +478,14 @@ def apply_battle_item(
             return None
         healed = target.heal(target.max_hp)
         target.status = "none"
+        target.volatile.clear()
         return f"💚 **{target.name}** полностью восстановлен ({data['name']})."
 
     if cat == "cure_status":
-        if target.status == "none":
+        if target.status == "none" and not target.volatile:
             return f"⚠️ У **{target.name}** нет статуса."
         target.status = "none"
+        target.volatile.clear()
         return f"✨ Статус **{target.name}** снят ({data['name']})."
 
     if cat == "revive":
