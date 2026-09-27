@@ -1,4 +1,4 @@
-"""Движок боя: покемон, урон, статусы, поле, погода."""
+"""Движок боя: покемон, урон, статусы, поле, погода, предметы."""
 from __future__ import annotations
 
 import random
@@ -12,7 +12,6 @@ from battle_data import (
     WEATHER_DURATION_EXTENDED,
     WEATHER_LABEL,
     WEATHER_MOVES,
-    WEATHER_ROCKS,
     WEATHER_TICK_DAMAGE,
     damage_label,
     get_type_multiplier,
@@ -59,7 +58,6 @@ class BattlePokemon:
         self.protect: bool = False
         self.flinched: bool = False
 
-    # ------------------------------------------------------------------ #
     def _calc_hp(self, base: int) -> int:
         return int(2 * base * self.level / 100) + self.level + 10
 
@@ -68,7 +66,6 @@ class BattlePokemon:
         val = int(val * nature_multiplier(self.nature)[key])
         return max(1, val)
 
-    # ------------------------------------------------------------------ #
     @property
     def fainted(self) -> bool:
         return self.hp <= 0
@@ -85,18 +82,6 @@ class BattlePokemon:
 
     def stage_value(self, key: str) -> float:
         return stage_mult(self.stages.get(key, 0))
-
-    def effective_speed(self, weather: "WeatherField") -> int:
-        base = self.stats["speed"] * self.stage_value("speed")
-        if (self.ability or "").lower() == "swift-swim" and weather.kind == "rain":
-            base *= 2
-        if (self.ability or "").lower() == "chlorophyll" and weather.kind == "sunny":
-            base *= 2
-        if (self.ability or "").lower() == "sand-rush" and weather.kind == "sandstorm":
-            base *= 2
-        if (self.ability or "").lower() == "slush-rush" and weather.kind == "snow":
-            base *= 2
-        return int(base)
 
     def reset_stages(self) -> None:
         for k in self.stages:
@@ -121,7 +106,7 @@ class BattlePokemon:
 
 
 # ==========================================================================
-#  ПОЛЕ БОЯ (одна сторона)
+#  ПОЛЕ БОЯ
 # ==========================================================================
 class SideField:
     def __init__(self) -> None:
@@ -184,7 +169,6 @@ class WeatherField:
         return WEATHER_DAMAGE_MULT.get(self.kind, {}).get(move_type, 1.0)
 
     def accuracy_override(self, move_name: str) -> Optional[int]:
-        """Возвращает 100 если атака всегда попадает в этой погоде."""
         low = move_name.lower().replace(" ", "-")
         if low in WEATHER_ACCURACY_MULT.get(self.kind, {}):
             return 100
@@ -330,7 +314,6 @@ def calc_damage(
     stab = 1.5 if move_type in attacker.types else 1.0
     weather_mult = weather.damage_mult(move_type)
 
-    # Защита от песка: Rock получает больше SP DEF (уже не критично)
     base = (
         ((2 * attacker.level / 5 + 2) * power * atk / dfn) / 50
     ) + 2
@@ -347,7 +330,6 @@ def accuracy_check(
     move: dict,
     weather: WeatherField,
 ) -> tuple[bool, float]:
-    # Погодные override
     override = weather.accuracy_override(move["name"])
     acc = move.get("accuracy") if override is None else override
     if acc is None:
@@ -376,7 +358,6 @@ def on_switch_in_ability(mon: BattlePokemon) -> list[str]:
 
 
 def ability_weather_on_switch(mon: BattlePokemon) -> Optional[str]:
-    """Возвращает погоду, которую вызывает способность."""
     return WEATHER_ABILITIES.get((mon.ability or "").lower())
 
 
@@ -388,15 +369,11 @@ def apply_intimidate(target: BattlePokemon) -> str:
 # ==========================================================================
 #  СТАТУСЫ + ПОГОДА В КОНЦЕ ХОДА
 # ==========================================================================
-def apply_end_of_turn(
-    mon: BattlePokemon, weather: WeatherField
-) -> list[dict]:
-    """Возвращает список событий за конец хода."""
+def apply_end_of_turn(mon: BattlePokemon, weather: WeatherField) -> list[dict]:
     events: list[dict] = []
     if mon.fainted:
         return events
 
-    # Статусы
     if mon.status == "burn":
         dmg = max(1, mon.max_hp // 16)
         mon.take_damage(dmg)
@@ -407,12 +384,10 @@ def apply_end_of_turn(
         mon.take_damage(dmg)
         events.append({"type": "tick_poison", "dmg": dmg})
 
-    # Погода
     config = WEATHER_TICK_DAMAGE.get(weather.kind)
     if config and not mon.fainted:
         immune = config.get("immune_types", [])
         if not any(t in immune for t in mon.types):
-            # Magic Guard / Overcoat иммунитет
             ability = (mon.ability or "").lower()
             if ability not in ("magic-guard", "overcoat", "sand-veil", "sand-rush",
                                "snow-cloak", "ice-body"):
@@ -424,15 +399,98 @@ def apply_end_of_turn(
                     "dmg": dmg,
                     "kind": weather.kind,
                 })
-        # Ice Body / Rain Dish / Dry Skin — лечат
-        ability = (mon.ability or "").lower()
-        if ability == "ice-body" and weather.kind == "snow":
-            healed = mon.heal(max(1, mon.max_hp // 16))
-            if healed:
-                events.append({"type": "heal_weather", "hp": healed, "kind": weather.kind})
-        elif ability == "rain-dish" and weather.kind == "rain":
-            healed = mon.heal(max(1, mon.max_hp // 16))
-            if healed:
-                events.append({"type": "heal_weather", "hp": healed, "kind": weather.kind})
 
     return events
+
+
+# ==========================================================================
+#  ПРЕДМЕТЫ В БОЮ
+# ==========================================================================
+
+# Эффекты предметов для боя
+BATTLE_ITEMS: dict[str, dict] = {
+    # Зелья
+    "potion":         {"category": "heal", "amount": 20,   "name": "Зелье"},
+    "super_potion":   {"category": "heal", "amount": 50,   "name": "Супер-зелье"},
+    "hyper_potion":   {"category": "heal", "amount": 120,  "name": "Гипер-зелье"},
+    "max_potion":     {"category": "heal", "amount": 9999, "name": "Макс-зелье"},
+    "fresh_water":    {"category": "heal", "amount": 30,   "name": "Свежая вода"},
+    "soda_pop":       {"category": "heal", "amount": 50,   "name": "Газировка"},
+    "lemonade":       {"category": "heal", "amount": 70,   "name": "Лимонад"},
+    "moomoo_milk":    {"category": "heal", "amount": 100,  "name": "Молоко Му-Му"},
+    "full_restore":   {"category": "full_heal",            "name": "Полное восстановление"},
+    "max_honey":      {"category": "full_heal",            "name": "Макс-мёд"},
+
+    # Статусы
+    "antidote":       {"category": "cure_status",          "name": "Антидот"},
+    "full_heal":      {"category": "cure_status",          "name": "Полное лечение"},
+    "lum_berry":      {"category": "cure_status",          "name": "Ягода Лум"},
+
+    # Оживитель
+    "revive":         {"category": "revive", "hp_pct": 0.5, "name": "Оживитель"},
+    "max_revive":     {"category": "revive", "hp_pct": 1.0, "name": "Макс-оживитель"},
+    "revival_herb":   {"category": "revive", "hp_pct": 1.0, "name": "Трава возрождения"},
+
+    # X-предметы
+    "x_attack":       {"category": "boost", "stat": "attack",    "stages": 1, "name": "X Атака"},
+    "x_defense":      {"category": "boost", "stat": "defense",   "stages": 1, "name": "X Защита"},
+    "x_sp_atk":       {"category": "boost", "stat": "sp_attack", "stages": 1, "name": "X Спец. Атака"},
+    "x_sp_def":       {"category": "boost", "stat": "sp_defense","stages": 1, "name": "X Спец. Защита"},
+    "x_speed":        {"category": "boost", "stat": "speed",     "stages": 1, "name": "X Скорость"},
+    "x_accuracy":     {"category": "boost", "stat": "accuracy",  "stages": 1, "name": "X Точность"},
+    "dire_hit":       {"category": "crit_boost",                 "name": "Dire Hit"},
+}
+
+
+def is_battle_item(item_key: str) -> bool:
+    return item_key in BATTLE_ITEMS
+
+
+def apply_battle_item(
+    item_key: str,
+    target: BattlePokemon,
+) -> Optional[str]:
+    """Применяет предмет к покемону. Возвращает строку для лога или None."""
+    data = BATTLE_ITEMS.get(item_key)
+    if not data:
+        return None
+
+    cat = data["category"]
+
+    if cat == "heal":
+        if target.fainted:
+            return None
+        healed = target.heal(int(data["amount"]))
+        if healed <= 0:
+            return f"⚠️ **{target.name}** уже с полным HP."
+        return f"💊 **{target.name}** восстанавливает **{healed}** HP ({data['name']})."
+
+    if cat == "full_heal":
+        if target.fainted:
+            return None
+        healed = target.heal(target.max_hp)
+        target.status = "none"
+        return f"💚 **{target.name}** полностью восстановлен ({data['name']})."
+
+    if cat == "cure_status":
+        if target.status == "none":
+            return f"⚠️ У **{target.name}** нет статуса."
+        target.status = "none"
+        return f"✨ Статус **{target.name}** снят ({data['name']})."
+
+    if cat == "revive":
+        if not target.fainted:
+            return f"⚠️ **{target.name}** не выбыл."
+        target.hp = max(1, int(target.max_hp * float(data["hp_pct"])))
+        return f"💫 **{target.name}** возрождён с **{target.hp}** HP ({data['name']})."
+
+    if cat == "boost":
+        stat = data["stat"]
+        target.stages[stat] = min(6, target.stages[stat] + int(data["stages"]))
+        return f"📈 **{stat}** покемона **{target.name}** повышен ({data['name']})."
+
+    if cat == "crit_boost":
+        target.stages["accuracy"] = min(6, target.stages["accuracy"] + 1)
+        return f"🎯 Шанс крита **{target.name}** повышен ({data['name']})."
+
+    return None
