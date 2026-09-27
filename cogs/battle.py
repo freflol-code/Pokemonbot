@@ -1,4 +1,6 @@
-"""Боевая система: /battle @юзер — статусы, приоритеты, статы, погода, поле."""
+"""Боевая система: статусы, приоритеты, статы, Baton Pass / U-turn / Volt Switch,
+Substitute, Leech Seed, Taunt, Encore, Disable, способности, badly poison."""
+import asyncio
 import logging
 import random
 from typing import Optional
@@ -12,6 +14,7 @@ import pokeapi_client
 from battle_data import (
     STATUS_EMOJI,
     damage_label,
+    get_crit_stage,
     get_move_priority,
     get_status_move,
     is_status_move,
@@ -27,11 +30,15 @@ from battle_engine import (
     apply_end_of_turn,
     apply_field_move,
     apply_intimidate,
+    apply_switch_cure,
+    apply_switch_heal,
     apply_switch_in_hazards,
     calc_damage,
     crit_check,
+    is_baton_pass_move,
     is_battle_item,
     is_field_move,
+    is_pivot_move,
     is_weather_move,
     on_switch_in_ability,
 )
@@ -61,20 +68,21 @@ STAT_RU = {
 }
 
 STATUS_RU = {
-    "burn":       "ожог",
-    "poison":     "отравление",
+    "burn":         "ожог",
+    "poison":       "отравление",
     "badly_poison": "сильное отравление",
-    "paralysis":  "паралич",
-    "sleep":      "сон",
-    "freeze":     "заморозка",
-    "confused":   "замешательство",
-    "infatuated": "влюблённость",
+    "paralysis":    "паралич",
+    "sleep":        "сон",
+    "freeze":       "заморозка",
+    "confused":     "замешательство",
+    "infatuated":   "влюблённость",
 }
 
 # Иммунитеты типов к статусам
 TYPE_STATUS_IMMUNITY: dict[str, set[str]] = {
     "burn":      {"fire"},
     "poison":    {"poison", "steel"},
+    "badly_poison": {"poison", "steel"},
     "paralysis": {"electric"},
     "freeze":    {"ice"},
 }
@@ -83,6 +91,7 @@ TYPE_STATUS_IMMUNITY: dict[str, set[str]] = {
 ABILITY_STATUS_IMMUNITY: dict[str, set[str]] = {
     "burn":      {"water-veil", "thermal-exchange"},
     "poison":    {"immunity"},
+    "badly_poison": {"immunity"},
     "paralysis": {"limber"},
     "sleep":     {"insomnia", "vital-spirit"},
     "freeze":    {"magma-armor"},
@@ -152,7 +161,17 @@ def _status_emoji_str(mon: BattlePokemon) -> str:
         parts.append(STATUS_EMOJI.get(mon.status, ""))
     for key in mon.volatile:
         parts.append(STATUS_EMOJI.get(key, ""))
+    if mon.has_substitute:
+        parts.append(STATUS_EMOJI.get("substitute", "🎭"))
+    if mon.leech_seed:
+        parts.append(STATUS_EMOJI.get("leech_seed", "🌱"))
+    if mon.flash_fire_active:
+        parts.append(STATUS_EMOJI.get("flash_fire", "🔥"))
     return "".join(p for p in parts if p)
+
+
+def _crit_bonus(mon: BattlePokemon) -> int:
+    return int(getattr(mon, "crit_bonus", 0))
 
 
 # ==========================================================================
@@ -203,9 +222,10 @@ class BattleItemView(discord.ui.View):
 #  СМЕНА ПОКЕМОНА
 # ==========================================================================
 class SwitchSelect(discord.ui.Select):
-    def __init__(self, battle: "Battle", uid: int):
+    def __init__(self, battle: "Battle", uid: int, reason: Optional[str]):
         self.battle = battle
         self.uid = uid
+        self.reason = reason
         options: list[discord.SelectOption] = []
         party = battle.parties[uid]
         current_id = battle.active_index[uid]
@@ -236,16 +256,16 @@ class SwitchSelect(discord.ui.Select):
                 "Нет живых покемонов для смены.", ephemeral=True
             )
             return
-        await self.battle.register_action(
-            interaction, self.uid,
-            {"type": "switch", "index": int(self.values[0])},
+        await interaction.response.defer()
+        await self.battle.handle_switch_pick(
+            self.uid, int(self.values[0]), reason=self.reason
         )
 
 
 class SwitchView(discord.ui.View):
-    def __init__(self, battle: "Battle", uid: int):
-        super().__init__(timeout=60)
-        self.add_item(SwitchSelect(battle, uid))
+    def __init__(self, battle: "Battle", uid: int, reason: Optional[str] = None):
+        super().__init__(timeout=120)
+        self.add_item(SwitchSelect(battle, uid, reason))
 
 
 # ==========================================================================
@@ -253,10 +273,11 @@ class SwitchView(discord.ui.View):
 # ==========================================================================
 class BattleMoveButton(discord.ui.Button):
     def __init__(self, battle: "Battle", owner: int, move: dict, idx: int):
-        # цвет кнопки по типу действия
         raw = move.get("raw_name", "")
-        if is_status_move(raw):
+        if is_status_move(raw) or is_baton_pass_move(raw):
             style = discord.ButtonStyle.secondary
+        elif is_pivot_move(raw):
+            style = discord.ButtonStyle.success
         else:
             style = discord.ButtonStyle.primary
         super().__init__(
@@ -306,8 +327,10 @@ class BattleView(discord.ui.View):
         if interaction.user.id != self.owner:
             await interaction.response.send_message("Это не ваш ход.", ephemeral=True)
             return
-        await interaction.response.send_message(
-            "Кого выпустить?", view=SwitchView(self.battle, self.owner), ephemeral=True
+        # ручная смена — регистрируем как действие
+        await interaction.response.defer()
+        await self.battle.register_action(
+            interaction, self.owner, {"type": "manual_switch"}
         )
 
     async def _on_item(self, interaction: discord.Interaction) -> None:
@@ -337,12 +360,16 @@ class Battle:
         self.inventories: dict[int, dict[str, int]] = {p1: {}, p2: {}}
         self.messages: list[discord.Message] = []
         self.log_lines: list[str] = []
-        self.views: dict[int, BattleView] = {}
+        self.views: dict[int, discord.Message] = {}
         self.finished = False
 
         # очередь ходов
         self.turn_actions: dict[int, dict] = {}
         self.turn_number: int = 0
+
+        # ожидание принудительной смены (pivot / baton / faint)
+        self.pending_switch: dict[int, str] = {}
+        self.switch_futures: dict[int, asyncio.Future] = {}
 
     # ------------------------------------------------------------------ #
     async def start(self) -> bool:
@@ -435,10 +462,27 @@ class Battle:
             )
             return
 
+        # Если это "ручная смена", сразу показываем меню
+        if action["type"] == "manual_switch":
+            await interaction.followup.send(
+                "Кого выпустить?",
+                view=SwitchView(self, uid, reason=None),
+                ephemeral=True,
+            )
+            return
+
         self.turn_actions[uid] = action
-        await interaction.response.send_message(
-            "✅ Ход принят. Ждём соперника…", ephemeral=True
-        )
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    "✅ Ход принят. Ждём соперника…", ephemeral=True
+                )
+            else:
+                await interaction.followup.send(
+                    "✅ Ход принят. Ждём соперника…", ephemeral=True
+                )
+        except discord.HTTPException:
+            pass
 
         if len(self.turn_actions) >= len(self.players):
             await self._resolve_turn()
@@ -446,7 +490,6 @@ class Battle:
     def _order_actions(
         self, actions: dict[int, dict]
     ) -> list[tuple[int, dict]]:
-        """Сортировка: приоритет атаки, затем скорость."""
         rows: list[tuple[int, dict, int, float]] = []
         for uid, action in actions.items():
             if action["type"] == "switch":
@@ -457,7 +500,7 @@ class Battle:
                 move = action.get("move") or {}
                 prio = get_move_priority(move.get("raw_name", ""))
             mon = self.current.get(uid)
-            speed = (mon.stats["speed"] * mon.stage_value("speed")) if mon else 0
+            speed = mon.effective_speed() if mon else 0
             rows.append((uid, action, prio, speed))
         rows.sort(key=lambda x: (-x[2], -x[3], random.random()))
         return [(uid, action) for uid, action, _, _ in rows]
@@ -501,13 +544,50 @@ class Battle:
         if defender is None:
             return
 
-        # 1) Пре-проверки статусов (сон, заморозка, паралич, конфуз, влюблённость)
+        # --- Пре-проверки статусов ---
         if not self._pre_move_check(attacker):
             return
 
         raw_name = move.get("raw_name", move["name"].lower().replace(" ", "-"))
 
-        # 2) Погода
+        # --- Encore: принудительно используется заэнкоренная атака ---
+        encored = attacker.volatile.get("encore", 0)
+        encored_move = getattr(attacker, "encored_move", None)
+        if encored and encored_move:
+            if raw_name != encored_move:
+                forced = next(
+                    (m for m in attacker.moves if m.get("raw_name") == encored_move),
+                    None,
+                )
+                if forced:
+                    move = forced
+                    raw_name = encored_move
+
+        # --- Disable: заблокированная атака ---
+        if attacker.disabled_move and raw_name == attacker.disabled_move:
+            self.log_lines.append(
+                f"🚫 **{move['name']}** заблокирован (Disable)!"
+            )
+            return
+
+        # --- Taunt: запрет статусных атак ---
+        if attacker.volatile.get("taunt", 0) > 0 and is_status_move(raw_name):
+            self.log_lines.append(
+                f"😤 **{attacker.name}** под Taunt — статусные атаки запрещены!"
+            )
+            return
+
+        # --- Baton Pass ---
+        if is_baton_pass_move(raw_name):
+            self.log_lines.append(
+                msg.pick(msg.ATTACK_TEMPLATES).format(
+                    who=attacker.name, move=move["name"]
+                )
+            )
+            await self._wait_for_switch(uid, reason="baton")
+            return
+
+        # --- Погода ---
         weather_key = is_weather_move(raw_name)
         if weather_key:
             self.weather.set(weather_key)
@@ -519,19 +599,26 @@ class Battle:
             )
             return
 
-        # 3) Полевые
+        # --- Полевые ---
         effect_key = is_field_move(move["name"])
         if effect_key:
             await self._resolve_field_move(attacker, defender, move, effect_key, uid)
             return
 
-        # 4) Статусные (inflict / boost / debuff / heal)
+        # --- Статусные ---
         if is_status_move(raw_name):
             await self._do_status_move(attacker, defender, move, uid)
             return
 
-        # 5) Обычный урон
+        # --- Обычный урон ---
         await self._resolve_attack(attacker, defender, move)
+
+        # --- Pivot (U-turn / Volt Switch / Flip Turn / Parting Shot) ---
+        if is_pivot_move(raw_name):
+            self.log_lines.append(
+                f"🔄 **{attacker.name}** собирается отступить после атаки!"
+            )
+            await self._wait_for_switch(uid, reason="pivot")
 
     def _pre_move_check(self, mon: BattlePokemon) -> bool:
         """True — можно действовать, False — ход потерян."""
@@ -563,25 +650,29 @@ class Battle:
         if "infatuated" in mon.volatile:
             if random.random() < 0.5:
                 self.log_lines.append(
-                    f"💗 **{mon.name}** влюблён и не может атаковать!"
+                    msg.pick(msg.INFATUATED_SKIP).format(name=mon.name)
                 )
                 return False
-            # 50% шанс «развеяться» после попытки
             if random.random() < 0.3:
                 mon.volatile.pop("infatuated", None)
+                self.log_lines.append(
+                    msg.pick(msg.INFATUATED_END).format(name=mon.name)
+                )
 
         # Конфуз — 33% ударить себя
         if "confused" in mon.volatile:
             mon.volatile["confused"] -= 1
             if mon.volatile["confused"] <= 0:
                 mon.volatile.pop("confused", None)
-                self.log_lines.append(f"🌀 **{mon.name}** приходит в себя!")
+                self.log_lines.append(msg.pick(msg.CONFUSED_END).format(name=mon.name))
             else:
                 if random.random() < 0.33:
                     dmg = max(1, int(mon.max_hp / 8))
                     mon.take_damage(dmg)
                     self.log_lines.append(
-                        f"🌀 **{mon.name}** бьёт себя в замешательстве (−{dmg} HP)!"
+                        msg.pick(msg.CONFUSED_SELF_HIT).format(
+                            name=mon.name, dmg=dmg
+                        )
                     )
                     return False
 
@@ -606,7 +697,10 @@ class Battle:
             )
             return
 
-        is_crit = crit_check()
+        raw_name = move.get("raw_name", "")
+        crit_bonus = _crit_bonus(attacker)
+        is_crit = crit_check(stage=crit_bonus, raw_name=raw_name)
+
         uid = self._me_uid(attacker)
         result = calc_damage(
             attacker, defender, move,
@@ -614,18 +708,76 @@ class Battle:
             attacker_side=self.fields[uid],
             weather=self.weather,
             crit=is_crit,
+            crit_stage=crit_bonus,
         )
+
+        # --- Способность-иммунитет (Volt Absorb, Flash Fire и т.д.) ---
+        immunity = result.get("ability_immunity")
+        if immunity:
+            effect = immunity.get("effect")
+            ability = immunity.get("ability", "")
+            if effect == "wonder_guard":
+                self.log_lines.append(
+                    msg.pick(msg.ABILITY_IMMUNITY_LINES.get(
+                        "wonder-guard", ["🛡️ Wonder Guard!"]
+                    )).format(name=defender.name)
+                )
+                return
+            tmpl = msg.ABILITY_IMMUNITY_LINES.get(
+                ability, ["🛡️ **{name}** невосприимчив!"]
+            )
+            self.log_lines.append(msg.pick(tmpl).format(name=defender.name))
+            if immunity.get("heal"):
+                self.log_lines.append(
+                    f"💚 Восстановлено **{immunity['heal']}** HP."
+                )
+            if immunity.get("boost"):
+                self.log_lines.append(
+                    f"📈 {STAT_RU.get(immunity['boost'], immunity['boost'])} "
+                    f"повышена!"
+                )
+            return
+
         if result["mult"] == 0:
             self.log_lines.append(
                 msg.pick(msg.IMMUNE_TEMPLATES).format(target=defender.name)
             )
             return
+
+        # --- Substitute принимает урон вместо покемона ---
+        if defender.has_substitute:
+            dmg = result["dmg"]
+            if dmg >= defender.substitute_hp:
+                defender.substitute_hp = 0
+                self.log_lines.append(
+                    msg.pick(msg.SUBSTITUTE_BREAK).format(name=defender.name)
+                )
+            else:
+                defender.substitute_hp -= dmg
+                self.log_lines.append(
+                    msg.pick(msg.SUBSTITUTE_ABSORB).format(
+                        name=defender.name, dmg=dmg
+                    )
+                )
+            return
+
         if is_crit:
             self.log_lines.append(msg.pick(msg.CRIT_LINES))
+
         defender.take_damage(result["dmg"])
         self.log_lines.append(
             msg.pick(msg.HIT_TEMPLATES).format(target=defender.name, dmg=result["dmg"])
         )
+
+        if result.get("sturdy_triggered"):
+            self.log_lines.append(
+                msg.pick(msg.ABILITY_STURDY_LINE).format(name=defender.name)
+            )
+        if result.get("multiscale_triggered"):
+            self.log_lines.append(
+                msg.pick(msg.ABILITY_MULTISCALE_LINE).format(name=defender.name)
+            )
+
         lbl = damage_label(result["mult"])
         if lbl:
             self.log_lines.append(lbl)
@@ -646,13 +798,19 @@ class Battle:
             msg.pick(msg.ATTACK_TEMPLATES).format(who=attacker.name, move=move["name"])
         )
 
-        # Точность (из PokéAPI, если не None)
         acc = move.get("accuracy")
         target_name = data.get("target", "opponent")
         target = attacker if target_name == "self" else defender
 
+        # Substitute блокирует статусные, нацеленные на соперника
+        if target_name == "opponent" and defender.has_substitute:
+            self.log_lines.append(
+                msg.pick(msg.SUBSTITUTE_BLOCK).format(name=defender.name)
+            )
+            return
+
         if acc is not None and target_name == "opponent":
-            chance = (float(acc) / 100.0)
+            chance = float(acc) / 100.0
             chance *= attacker.stage_value("accuracy")
             chance /= defender.stage_value("evasion")
             chance = max(0.05, min(1.0, chance))
@@ -663,12 +821,23 @@ class Battle:
                 return
 
         category = data.get("category")
+
         if category == "inflict":
             self._apply_status(target, data.get("status"), source=attacker)
         elif category in ("boost", "debuff"):
             self._change_stage(target, data["stat"], int(data["stages"]))
         elif category == "heal":
             await self._do_heal(data, attacker, uid)
+        elif category == "substitute":
+            self._do_substitute(attacker, data)
+        elif category == "leech_seed":
+            self._do_leech_seed(attacker, defender)
+        elif category == "taunt":
+            self._do_taunt(attacker, defender, data)
+        elif category == "encore":
+            self._do_encore(attacker, defender, data)
+        elif category == "disable":
+            self._do_disable(attacker, defender, data)
         else:
             self.log_lines.append(f"⚠️ Атака **{move['name']}** не сработала.")
 
@@ -679,7 +848,6 @@ class Battle:
         if not status:
             return
 
-        # Иммунитеты типов
         immune_by_type = TYPE_STATUS_IMMUNITY.get(status, set())
         if any(t in immune_by_type for t in target.types):
             self.log_lines.append(
@@ -687,7 +855,6 @@ class Battle:
             )
             return
 
-        # Иммунитеты способностей
         ability = (target.ability or "").lower()
         if ability in ABILITY_STATUS_IMMUNITY.get(status, set()):
             self.log_lines.append(
@@ -708,16 +875,20 @@ class Battle:
                         or target.gender == "genderless"
                         or source.gender == target.gender):
                     self.log_lines.append(
-                        "💗 Эффект не сработал (пол не подходит)."
+                        msg.pick(msg.INFATUATED_FAIL).format(name=target.name)
                     )
                     return
 
             turns = random.randint(2, 5) if status == "confused" else 5
             target.volatile[status] = turns
-            emoji = STATUS_EMOJI.get(status, "")
-            self.log_lines.append(
-                f"{emoji} **{target.name}** — {STATUS_RU.get(status, status)}!"
-            )
+            tmpl = msg.STATUS_INFLICT.get(status)
+            if tmpl:
+                self.log_lines.append(msg.pick(tmpl).format(name=target.name))
+            else:
+                emoji = STATUS_EMOJI.get(status, "")
+                self.log_lines.append(
+                    f"{emoji} **{target.name}** — {STATUS_RU.get(status, status)}!"
+                )
             return
 
         # Обычные статусы: только один
@@ -728,6 +899,8 @@ class Battle:
         target.status = status
         if status == "sleep":
             target.status_counter = random.randint(2, 4)
+        elif status == "badly_poison":
+            target.toxic_counter = 1
         else:
             target.status_counter = 0
 
@@ -760,22 +933,17 @@ class Battle:
 
         mon.stages[stat] = new
         if stages > 0:
-            self.log_lines.append(
-                f"📈 {name} **{mon.name}** повышена!"
-            )
+            self.log_lines.append(f"📈 {name} **{mon.name}** повышена!")
         else:
-            self.log_lines.append(
-                f"📉 {name} **{mon.name}** понижена!"
-            )
+            self.log_lines.append(f"📉 {name} **{mon.name}** понижена!")
 
     async def _do_heal(self, data: dict, attacker: BattlePokemon, uid: int) -> None:
         if data.get("cure_team"):
             if attacker.status != "none":
                 attacker.status = "none"
                 attacker.status_counter = 0
-                self.log_lines.append(
-                    f"✨ Статус **{attacker.name}** снят!"
-                )
+                attacker.toxic_counter = 0
+                self.log_lines.append(f"✨ Статус **{attacker.name}** снят!")
             else:
                 self.log_lines.append("✨ Нечего лечить.")
             return
@@ -806,6 +974,104 @@ class Battle:
             self.log_lines.append(f"⚠️ **{attacker.name}** уже на полном HP.")
 
     # ------------------------------------------------------------------ #
+    #  SUBSTITUTE / LEECH SEED / TAUNT / ENCORE / DISABLE
+    # ------------------------------------------------------------------ #
+    def _do_substitute(self, attacker: BattlePokemon, data: dict) -> None:
+        if attacker.has_substitute:
+            self.log_lines.append(
+                msg.pick(msg.SUBSTITUTE_ALREADY).format(name=attacker.name)
+            )
+            return
+        cost = max(1, attacker.max_hp // int(data.get("fraction", 4)))
+        if attacker.hp <= cost:
+            self.log_lines.append(
+                msg.pick(msg.SUBSTITUTE_TOO_LOW).format(name=attacker.name)
+            )
+            return
+        attacker.take_damage(cost)
+        attacker.substitute_hp = cost
+        self.log_lines.append(
+            msg.pick(msg.SUBSTITUTE_CREATE).format(name=attacker.name, hp=cost)
+        )
+
+    def _do_leech_seed(
+        self, attacker: BattlePokemon, defender: BattlePokemon
+    ) -> None:
+        if "grass" in defender.types:
+            self.log_lines.append(
+                f"🌱 **{defender.name}** не поддаётся Leech Seed (трава)."
+            )
+            return
+        if defender.leech_seed:
+            self.log_lines.append(
+                msg.pick(msg.LEECH_SEED_ALREADY).format(name=defender.name)
+            )
+            return
+        defender.leech_seed = True
+        self.log_lines.append(
+            msg.pick(msg.LEECH_SEED_INFLICT).format(name=defender.name)
+        )
+
+    def _do_taunt(
+        self, attacker: BattlePokemon, defender: BattlePokemon, data: dict
+    ) -> None:
+        if defender.volatile.get("taunt", 0) > 0:
+            self.log_lines.append(msg.pick(msg.TAUNT_ALREADY).format(name=defender.name))
+            return
+        turns = int(data.get("turns", 3))
+        defender.volatile["taunt"] = turns
+        self.log_lines.append(
+            msg.pick(msg.TAUNT_INFLICT).format(name=defender.name)
+        )
+
+    def _do_encore(
+        self, attacker: BattlePokemon, defender: BattlePokemon, data: dict
+    ) -> None:
+        if defender.volatile.get("encore", 0) > 0:
+            self.log_lines.append(
+                msg.pick(msg.ENCORE_ALREADY).format(name=defender.name)
+            )
+            return
+        last = getattr(defender, "last_move", None)
+        if not last:
+            self.log_lines.append(
+                msg.pick(msg.ENCORE_NO_MOVE).format(name=defender.name)
+            )
+            return
+        # не энкорим статусные атаки с 0 power? — вообще-то можно
+        turns = int(data.get("turns", 3))
+        defender.volatile["encore"] = turns
+        defender.encored_move = last
+        self.log_lines.append(
+            msg.pick(msg.ENCORE_INFLICT).format(
+                name=defender.name, move=last.replace("-", " ").title()
+            )
+        )
+
+    def _do_disable(
+        self, attacker: BattlePokemon, defender: BattlePokemon, data: dict
+    ) -> None:
+        if defender.volatile.get("disable", 0) > 0:
+            self.log_lines.append(
+                msg.pick(msg.DISABLE_ALREADY).format(name=defender.name)
+            )
+            return
+        last = getattr(defender, "last_move", None)
+        if not last:
+            self.log_lines.append(
+                msg.pick(msg.DISABLE_NO_MOVE).format(name=defender.name)
+            )
+            return
+        turns = int(data.get("turns", 4))
+        defender.volatile["disable"] = turns
+        defender.disabled_move = last
+        self.log_lines.append(
+            msg.pick(msg.DISABLE_INFLICT).format(
+                name=defender.name, move=last.replace("-", " ").title()
+            )
+        )
+
+    # ------------------------------------------------------------------ #
     #  ПОЛЕВЫЕ АТАКИ
     # ------------------------------------------------------------------ #
     async def _resolve_field_move(
@@ -833,18 +1099,43 @@ class Battle:
     # ------------------------------------------------------------------ #
     #  СМЕНА / ПРЕДМЕТ
     # ------------------------------------------------------------------ #
-    async def _do_switch(self, uid: int, new_idx: int) -> None:
+    async def _do_switch(
+        self, uid: int, new_idx: int, *, transfer_state: bool = False
+    ) -> None:
+        old = self.current.get(uid)
+
+        saved_stages = dict(old.stages) if old and transfer_state else None
+        saved_volatile = dict(old.volatile) if old and transfer_state else None
+        saved_sub_hp = old.substitute_hp if old and transfer_state else 0
+
+        # Способности при выходе (Regenerator, Natural Cure)
+        if old:
+            line = apply_switch_heal(old)
+            if line:
+                self.log_lines.append(line)
+            line = apply_switch_cure(old)
+            if line:
+                self.log_lines.append(line)
+
         self._save_active_hp(uid)
         if not await self._load_active(uid, new_idx):
-            self.log_lines.append(f"❌ Не удалось сменить покемона.")
+            self.log_lines.append("❌ Не удалось сменить покемона.")
             return
 
         new = self.current[uid]
+        if saved_stages is not None:
+            new.stages = saved_stages
+        if saved_volatile is not None:
+            new.volatile = saved_volatile
+            new.substitute_hp = saved_sub_hp
+
         self.log_lines.append(
             msg.pick(msg.SWITCH_LINES).format(who=f"<@{uid}>", next_mon=new.name)
         )
+
         for line in apply_switch_in_hazards(new, self.fields[uid]):
             self.log_lines.append(line)
+
         for line in on_switch_in_ability(new):
             self.log_lines.append(line)
 
@@ -861,6 +1152,36 @@ class Battle:
             )
         self._save_active_hp(uid)
 
+    async def handle_switch_pick(
+        self, uid: int, idx: int, reason: Optional[str] = None
+    ) -> None:
+        """Вызывается из SwitchView callback — как принудительный, так и ручной."""
+        await self._do_switch(uid, idx, transfer_state=(reason == "baton"))
+        self.pending_switch.pop(uid, None)
+        fut = self.switch_futures.pop(uid, None)
+        if fut and not fut.done():
+            fut.set_result(True)
+
+    async def _wait_for_switch(self, uid: int, *, reason: str) -> None:
+        """Ждёт, пока игрок выберет покемона (pivot / baton)."""
+        self.pending_switch[uid] = reason
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future = loop.create_future()
+        self.switch_futures[uid] = fut
+
+        await self.channel.send(
+            f"🔄 <@{uid}>, выбери, кто выйдет следующим "
+            f"({'Baton Pass' if reason == 'baton' else 'после атаки'})..."
+        )
+        await self.channel.send(view=SwitchView(self, uid, reason=reason))
+        try:
+            await asyncio.wait_for(fut, timeout=120)
+        except asyncio.TimeoutError:
+            self.log_lines.append(
+                f"⚠️ <@{uid}> не выбрал покемона вовремя — смена пропущена."
+            )
+            self.pending_switch.pop(uid, None)
+
     async def _do_item(self, uid: int, item_key: str) -> None:
         inv = self.inventories.get(uid, {})
         if inv.get(item_key, 0) <= 0:
@@ -875,41 +1196,121 @@ class Battle:
         inv[item_key] = max(0, inv.get(item_key, 1) - 1)
         self.log_lines.append(log_line)
 
+        # Dire Hit — +1 крит-стадия
+        if item_key == "dire_hit":
+            mon.crit_bonus = _crit_bonus(mon) + 1
+
     # ------------------------------------------------------------------ #
     #  КОНЕЦ ХОДА
     # ------------------------------------------------------------------ #
     async def _post_turn(self) -> None:
+        # Leech Seed — сначала собираем данные, чтобы отхилить «противника»
+        leech_heals: dict[int, int] = {}
+
         for uid in self.players:
             mon = self.current.get(uid)
             if not mon or mon.fainted:
                 continue
             events = apply_end_of_turn(mon, self.weather)
             for ev in events:
-                if ev["type"] == "tick_burn":
+                t = ev["type"]
+                if t == "tick_burn":
                     self.log_lines.append(
                         f"🟥 **{mon.name}** страдает от ожога (−{ev['dmg']} HP)."
                     )
-                elif ev["type"] == "tick_poison":
+                elif t == "tick_poison":
                     self.log_lines.append(
                         f"🟪 **{mon.name}** страдает от яда (−{ev['dmg']} HP)."
                     )
-                elif ev["type"] == "tick_weather":
+                elif t == "tick_badly_poison":
+                    self.log_lines.append(
+                        f"🟪 **{mon.name}** мучается от сильного яда "
+                        f"(−{ev['dmg']} HP, счётчик ×{ev['counter']})."
+                    )
+                elif t == "tick_weather":
                     tmpl = msg.pick(
                         msg.WEATHER_TICK_LINES.get(ev["kind"], ["Погода бьёт {name}."])
                     )
                     self.log_lines.append(tmpl.format(name=mon.name, dmg=ev["dmg"]))
+                elif t == "tick_leech_seed":
+                    tmpl = msg.pick(msg.LEECH_SEED_TICK)
+                    self.log_lines.append(tmpl.format(name=mon.name, dmg=ev["dmg"]))
+                    leech_heals[uid] = leech_heals.get(uid, 0) + ev["dmg"]
+                elif t == "heal_ability":
+                    ab = ev["ability"]
+                    tmpl = msg.pick(
+                        msg.ABILITY_END_HEAL.get(
+                            ab, ["💚 **{name}** восстанавливает {hp} HP."]
+                        )
+                    )
+                    self.log_lines.append(
+                        tmpl.format(name=mon.name, hp=ev["hp"])
+                    )
+                elif t == "hurt_ability":
+                    ab = ev["ability"]
+                    tmpl = msg.pick(
+                        msg.ABILITY_END_HURT.get(
+                            ab, ["⚠️ **{name}** теряет {dmg} HP ({ability})."]
+                        )
+                    )
+                    self.log_lines.append(
+                        tmpl.format(name=mon.name, dmg=ev["dmg"], ability=ab)
+                    )
+                elif t == "boost_ability":
+                    ab = ev["ability"]
+                    tmpl = msg.pick(
+                        msg.ABILITY_END_BOOST.get(ab, ["📈 **{name}** усиливается!"])
+                    )
+                    self.log_lines.append(
+                        tmpl.format(name=mon.name, stat=ev["stat"])
+                    )
 
+        # Leech Seed: хилит противоположного покемона
+        for uid, healed in leech_heals.items():
+            other_uid = self._other_player(uid)
+            healer = self.current.get(other_uid)
+            if healer and not healer.fainted:
+                got = healer.heal(healed)
+                if got > 0:
+                    self.log_lines.append(
+                        f"🌱 **{healer.name}** восстанавливает **{got}** HP "
+                        f"от Leech Seed."
+                    )
+
+        # Тик Taunt / Encore / Disable
+        for uid in self.players:
+            mon = self.current.get(uid)
+            if not mon:
+                continue
+            for key, end_msg in (
+                ("taunt", msg.TAUNT_END),
+                ("encore", msg.ENCORE_END),
+                ("disable", msg.DISABLE_END),
+            ):
+                if key in mon.volatile:
+                    mon.volatile[key] -= 1
+                    if mon.volatile[key] <= 0:
+                        mon.volatile.pop(key, None)
+                        self.log_lines.append(
+                            msg.pick(end_msg).format(name=mon.name)
+                        )
+                        if key == "encore":
+                            mon.encored_move = None
+                        if key == "disable":
+                            mon.disabled_move = None
+
+        # Тик полевых эффектов
         for uid in self.players:
             self._save_active_hp(uid)
             self.fields[uid].tick()
 
+        # Тик погоды
         old = self.weather.kind
         self.weather.tick()
         if old != "none" and self.weather.kind == "none":
             self.log_lines.append(msg.pick(msg.WEATHER_END_LINES))
 
     async def _handle_faints(self) -> None:
-        # сообщение о выбывании
         for uid in self.players:
             mon = self.current.get(uid)
             if mon and mon.fainted:
@@ -938,24 +1339,30 @@ class Battle:
 
         await self.send_main_message()
 
-        needing_switch = [
+        # Принудительная смена после faint
+        fainted_uids = [
             uid for uid in self.players
             if self.current.get(uid) and self.current[uid].fainted
         ]
-        if needing_switch:
-            for uid in needing_switch:
+        for uid in fainted_uids:
+            if uid not in self.pending_switch:
+                self.pending_switch[uid] = "faint"
                 await self.channel.send(
-                    f"<@{uid}>, твой покемон выбыл. Выбери следующего:",
-                    view=SwitchView(self, uid),
+                    f"<@{uid}>, твой покемон выбыл. Выбери следующего:"
                 )
-            # второй игрок тоже должен походить после смены
+                await self.channel.send(
+                    view=SwitchView(self, uid, reason="faint")
+                )
+
+        if not fainted_uids:
+            await self.send_move_views()
+        else:
+            # второй игрок ждёт
             for uid in self.players:
-                if uid not in needing_switch:
+                if uid not in fainted_uids:
                     await self.channel.send(
                         f"<@{uid}>, ждём, пока соперник выберет покемона…"
                     )
-        else:
-            await self.send_move_views()
 
     # ------------------------------------------------------------------ #
     #  UI / ЛОГ
@@ -1006,6 +1413,9 @@ class Battle:
 
     async def send_move_views(self) -> None:
         for uid in self.players:
+            # не показываем, если ждём принудительной смены
+            if uid in self.pending_switch:
+                continue
             attacker = self.current[uid]
             if attacker.fainted:
                 continue
