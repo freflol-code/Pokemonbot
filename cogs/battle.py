@@ -1195,6 +1195,8 @@ class Battle:
     async def handle_switch_pick(
         self, uid: int, idx: int, reason: Optional[str] = None
     ) -> None:
+        if self.finished:
+            return
         await self._do_switch(uid, idx, transfer_state=(reason == "baton"))
         self.pending_switch.pop(uid, None)
         fut = self.switch_futures.pop(uid, None)
@@ -1219,6 +1221,8 @@ class Battle:
         await self.channel.send(view=SwitchView(self, uid, reason=reason))
         try:
             await asyncio.wait_for(fut, timeout=180)
+            if self.finished:
+                return
         except asyncio.TimeoutError:
             self.log_lines.append(
                 f"⚠️ <@{uid}> не выбрал покемона вовремя — смена пропущена."
@@ -1503,6 +1507,29 @@ class Battle:
             )
         await self.channel.send(embed=embed)
 
+    # ------------------------------------------------------------------ #
+    async def force_end(self, reason: str) -> None:
+        """Прерывает бой без начисления побед/поражений и без наград."""
+        if self.finished:
+            return
+        self.finished = True
+
+        await self._cleanup_views()
+
+        # Разбудить тех, кто сейчас ждёт выбора покемона
+        for uid, fut in list(self.switch_futures.items()):
+            if not fut.done():
+                fut.set_result(False)
+        self.switch_futures.clear()
+        self.pending_switch.clear()
+
+        embed = discord.Embed(
+            title="🏁 Бой прерван",
+            description=reason,
+            color=0xE63946,
+        )
+        await self.channel.send(embed=embed)
+
 
 # ==========================================================================
 #  ПРИГЛАШЕНИЕ
@@ -1587,6 +1614,35 @@ class BattleCog(commands.Cog):
             color=0xE63946,
         )
         await interaction.response.send_message(embed=embed, view=view)
+
+    @app_commands.command(
+        name="battle_end",
+        description="Завершить бой в этом канале без результатов (без побед и поражений)",
+    )
+    async def battle_end(self, interaction: discord.Interaction) -> None:
+        battle = self.active_battles.get(interaction.channel_id)
+        if battle is None:
+            await interaction.response.send_message(
+                "В этом канале нет активного боя.", ephemeral=True
+            )
+            return
+
+        if battle.finished:
+            self.active_battles.pop(interaction.channel_id, None)
+            await interaction.response.send_message(
+                "Бой уже завершён.", ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        await battle.force_end(
+            f"Бой прерван по инициативе {interaction.user.mention}.\n"
+            f"Побед и поражений никому не начислено."
+        )
+        self.active_battles.pop(interaction.channel_id, None)
+        await interaction.followup.send(
+            "✅ Бой завершён без результатов.", ephemeral=True
+        )
 
 
 async def setup(bot: commands.Bot) -> None:
