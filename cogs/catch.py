@@ -170,13 +170,11 @@ def _chance_for_ball(
     rarity: str = COMMON,
 ) -> float:
     """Возвращает итоговый шанс (0–100)."""
-    # Гарантированные шары ловят всех без исключения
     if ball_key in GUARANTEED_BALLS:
         return 100.0
 
     base = BALL_BASE_CHANCE.get(ball_key, 25.0)
 
-    # --- Контекстные покеболы ---
     if ball_key == "net_ball":
         if "water" in species_types or "bug" in species_types:
             base += 25.0
@@ -238,17 +236,14 @@ def _chance_for_ball(
     elif ball_key == "gigaton_ball":
         base += 30.0
 
-    # --- Состояние ---
     if is_badly_wounded:
         base += 25.0
     elif is_wounded:
         base += 15.0
 
-    # --- Статус ---
     status_mult = STATUS_MULTIPLIER.get(status, 1.0)
     base = base * status_mult
 
-    # --- Редкость ---
     rarity_mult = RARITY_CATCH_MULTIPLIER.get(rarity, 1.0)
     base *= rarity_mult
 
@@ -342,7 +337,6 @@ class Catch(commands.Cog):
         actual_rarity = get_rarity(species_id)
         level = random.randint(2, 15)
 
-        # Repeat Ball: вид уже в покедексе?
         trainer = await get_trainer(uid)
         already_caught = species_id in trainer.get("pokedex_known", [])
 
