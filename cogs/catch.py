@@ -10,6 +10,13 @@ from discord.ext import commands
 import pokeapi_client
 from database import get_active_profile, get_item_qty, get_trainer, take_item
 from pokeapi_client import PokeAPIError
+from pokemon_rarity import (
+    COMMON,
+    RARITY_CATCH_MULTIPLIER,
+    RARITY_EMOJI,
+    RARITY_LABEL,
+    get_rarity,
+)
 
 log = logging.getLogger(__name__)
 
@@ -22,6 +29,7 @@ BALL_BASE_CHANCE: dict[str, float] = {
     "greatball": 50.0,
     "ultraball": 70.0,
     "masterball": 100.0,
+    # ... остальные — как было ...
     "net_ball": 25.0,
     "dive_ball": 25.0,
     "nest_ball": 25.0,
@@ -54,79 +62,13 @@ BALL_BASE_CHANCE: dict[str, float] = {
     "beast_ball": 25.0,
 }
 
-BALL_NAMES: dict[str, str] = {
-    "pokeball": "Покебол",
-    "greatball": "Грейтбол",
-    "ultraball": "Ультрабол",
-    "masterball": "Мастербол",
-    "net_ball": "Нетбол",
-    "dive_ball": "Дайвбол",
-    "nest_ball": "Нестбол",
-    "repeat_ball": "Репитбол",
-    "timer_ball": "Таймербол",
-    "heal_ball": "Хилбол",
-    "luxury_ball": "Люксбол",
-    "quick_ball": "Квикбол",
-    "dusk_ball": "Дускбол",
-    "premier_ball": "Премьер-болл",
-    "cherish_ball": "Чериш-болл",
-    "park_ball": "Парк-болл",
-    "sport_ball": "Спорт-болл",
-    "level_ball": "Левел-болл",
-    "lure_ball": "Люр-болл",
-    "moon_ball": "Мун-болл",
-    "friend_ball": "Френд-болл",
-    "love_ball": "Лав-болл",
-    "heavy_ball": "Хэви-болл",
-    "fast_ball": "Фаст-болл",
-    "dream_ball": "Дрим-болл",
-    "beast_ball": "Бист-болл",
-    "origin_ball": "Ориджин-болл",
-    "gs_ball": "GS-болл",
-    "strange_ball": "Стрэндж-болл",
-    "feather_ball": "Фезер-болл",
-    "wing_ball": "Винг-болл",
-    "jet_ball": "Джет-болл",
-    "leaden_ball": "Леден-болл",
-    "gigaton_ball": "Гигатон-болл",
-}
+# Шары, которые игнорируют редкость (ловят кого угодно)
+GUARANTEED_BALLS: frozenset[str] = frozenset({
+    "masterball", "cherish_ball", "park_ball", "origin_ball", "gs_ball",
+})
 
-CATCHABLE_BALLS = [
-    "pokeball", "greatball", "ultraball",
-    "net_ball", "dive_ball", "nest_ball", "repeat_ball",
-    "timer_ball", "heal_ball", "luxury_ball", "quick_ball", "dusk_ball",
-    "premier_ball", "sport_ball", "level_ball", "lure_ball",
-    "moon_ball", "friend_ball", "love_ball", "heavy_ball",
-]
-
-BALL_CHOICES = [
-    app_commands.Choice(name=BALL_NAMES[k], value=k) for k in CATCHABLE_BALLS
-]
-
-# Статусы: Сон/Заморозка ×2.5, Паралич/Ожог/Отравление ×1.5
-STATUS_CHOICES = [
-    app_commands.Choice(name="— Нет статуса", value="none"),
-    app_commands.Choice(name="💤 Сон (×2.5)", value="sleep"),
-    app_commands.Choice(name="❄️ Заморозка (×2.5)", value="freeze"),
-    app_commands.Choice(name="🟨 Паралич (×1.5)", value="paralysis"),
-    app_commands.Choice(name="🟥 Ожог (×1.5)", value="burn"),
-    app_commands.Choice(name="🟪 Отравление (×1.5)", value="poison"),
-]
-
-STATUS_MULTIPLIER: dict[str, float] = {
-    "sleep": 2.5,
-    "freeze": 2.5,
-    "paralysis": 1.5,
-    "burn": 1.5,
-    "poison": 1.5,
-    "none": 1.0,
-}
-
-
-def _is_night() -> bool:
-    import datetime
-    hour = datetime.datetime.now().hour
-    return hour >= 22 or hour < 6
+# ... BALL_NAMES, CATCHABLE_BALLS, BALL_CHOICES, STATUS_CHOICES,
+#     STATUS_MULTIPLIER, _is_night — оставить как было ...
 
 
 def _chance_for_ball(
@@ -143,8 +85,13 @@ def _chance_for_ball(
     is_underwater: bool,
     turn_number: int,
     already_caught: bool,
+    rarity: str = COMMON,
 ) -> float:
     """Возвращает итоговый шанс (0–100)."""
+    # Гарантированные шары ловят всех без исключения
+    if ball_key in GUARANTEED_BALLS:
+        return 100.0
+
     base = BALL_BASE_CHANCE.get(ball_key, 25.0)
 
     # --- Контекстные покеболы ---
@@ -219,17 +166,18 @@ def _chance_for_ball(
     status_mult = STATUS_MULTIPLIER.get(status, 1.0)
     base = base * status_mult
 
-    return max(5.0, min(100.0, base))
+    # --- Редкость ---
+    rarity_mult = RARITY_CATCH_MULTIPLIER.get(rarity, 1.0)
+    base *= rarity_mult
+
+    return max(1.0, min(100.0, base))
 
 
 class Catch(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
 
-    @app_commands.command(
-        name="catch",
-        description="Ловля покемона",
-    )
+    @app_commands.command(name="catch", description="Ловля покемона")
     @app_commands.describe(
         ball="Покебол из инвентаря персонажа",
         status="Статус покемона (Сон/Заморозка ×2.5, Паралич/Ожог/Яд ×1.5)",
@@ -278,24 +226,26 @@ class Catch(commands.Cog):
             )
             return
 
-        # ------------------------------------------------------------------ #
-        #  Честный расчёт: сначала берём покемона, считаем шанс,
-        #  но игроку имя не показываем.
-        # ------------------------------------------------------------------ #
+        # ---------------------------------------------------------------- #
+        #  Определяем покемона и его редкость
+        # ---------------------------------------------------------------- #
         species_id = 0
         species_types: list[str] = []
+        data: dict = {}
         try:
             species_id = random.randint(1, 1025)
             data = await pokeapi_client.get_pokemon(species_id)
             species_types = data.get("types", [])
         except PokeAPIError:
-            # Если PokéAPI недоступен — играем без бонусов к типам
+            log.warning("PokéAPI недоступен — играем без бонусов к типам")
             species_id = 0
             species_types = []
+            data = {}
 
+        rarity = get_rarity(species_id)
         level = random.randint(2, 15)
 
-        # Repeat Ball: проверяем, есть ли вид в покедексе
+        # Repeat Ball: вид уже в покедексе?
         trainer = await get_trainer(uid)
         already_caught = species_id in trainer.get("pokedex_known", [])
 
@@ -312,6 +262,7 @@ class Catch(commands.Cog):
             is_underwater=underwater,
             turn_number=int(turn),
             already_caught=already_caught,
+            rarity=rarity,
         )
 
         taken = await take_item(uid, ball_key, 1)
@@ -321,12 +272,38 @@ class Catch(commands.Cog):
             )
             return
 
-        success = random.randint(1, 100) <= round(chance)
+        roll = random.randint(1, 100)
+        success = roll <= round(chance)
+
+        # ---------------------------------------------------------------- #
+        #  Эмбед
+        # ---------------------------------------------------------------- #
+        mon_name = (data.get("name") or "Неизвестный покемон").title()
+        rarity_emoji = RARITY_EMOJI.get(rarity, "⚪")
+        rarity_label = RARITY_LABEL.get(rarity, rarity)
+
+        description = (
+            f"{rarity_emoji} **{mon_name}** — {rarity_label}\n"
+            f"🎚️ Уровень: **{level}**\n"
+            f"🎯 Шанс поимки: **{chance:.1f}%** (бросок: {roll})\n"
+            f"🎒 Потрачено: **{BALL_NAMES.get(ball_key, ball_key)}** ×1"
+        )
 
         embed = discord.Embed(
             title="🎉 Поймал!" if success else "💨 Не поймал",
-            color=discord.Color.green() if success else discord.Color.dark_red(),
+            description=description,
+            color=(
+                discord.Color.green() if success
+                else discord.Color.dark_red()
+            ),
         )
+        if data.get("artwork"):
+            embed.set_thumbnail(url=data["artwork"])
+        elif data.get("sprite"):
+            embed.set_thumbnail(url=data["sprite"])
+
+        embed.set_footer(text=f"Осталось {BALL_NAMES.get(ball_key, ball_key)}: {qty - 1}")
+
         await interaction.followup.send(embed=embed)
 
 
