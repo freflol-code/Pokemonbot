@@ -55,7 +55,6 @@ LEGENDARY_IDS: frozenset[int] = frozenset({
     1024,
 })
 
-# Удобный набор ID по группам — для выбора случайного вида в /catch
 _IDS_BY_RARITY: dict[str, frozenset[int]] = {
     PSEUDO_LEGENDARY: PSEUDO_LEGENDARY_IDS,
     LEGENDARY:        LEGENDARY_IDS,
@@ -78,5 +77,5 @@ def get_catch_multiplier(species_id: int) -> float:
 
 
 def get_ids_for_rarity(rarity: str) -> list[int]:
-    """Список видов в указанной группе. Для COMMON — None (любые из 1..1025)."""
+    """Список видов в указанной группе. Для COMMON — пустой (собирается отдельно)."""
     return sorted(_IDS_BY_RARITY.get(rarity, set()))
