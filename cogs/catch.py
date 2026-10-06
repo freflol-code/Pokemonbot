@@ -1,4 +1,5 @@
-"""Ловля покемонов: /catch — условия вводишь, результат видишь."""
+"""Ловля: /catch — чистая проверка шанса по условиям. Покемона выдаёт мастер через /give."""
+import datetime
 import logging
 import random
 from typing import Optional
@@ -7,19 +8,12 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-import pokeapi_client
-from database import get_active_profile, get_item_qty, get_trainer, take_item
-from pokeapi_client import PokeAPIError
+from database import get_active_profile, get_item_qty, take_item
 from pokemon_rarity import (
     COMMON,
-    LEGENDARY_IDS,
-    MYTHICAL_IDS,
-    PSEUDO_LEGENDARY_IDS,
     RARITY_CATCH_MULTIPLIER,
     RARITY_EMOJI,
     RARITY_LABEL,
-    get_ids_for_rarity,
-    get_rarity,
 )
 
 log = logging.getLogger(__name__)
@@ -148,7 +142,6 @@ RARITY_CHOICES = [
 
 
 def _is_night() -> bool:
-    import datetime
     hour = datetime.datetime.now().hour
     return hour >= 22 or hour < 6
 
@@ -156,8 +149,6 @@ def _is_night() -> bool:
 def _chance_for_ball(
     ball_key: str,
     *,
-    species_id: int = 0,
-    species_types: list[str],
     level: int,
     is_wounded: bool,
     is_badly_wounded: bool,
@@ -166,26 +157,21 @@ def _chance_for_ball(
     is_cave: bool,
     is_underwater: bool,
     turn_number: int,
-    already_caught: bool,
-    rarity: str = COMMON,
+    rarity: str,
 ) -> float:
-    """Возвращает итоговый шанс (0–100)."""
+    """Возвращает итоговый шанс (0–100).
+
+    Тип покемона неизвестен — командой не задаётся, поэтому
+    узко-типовые бонусы (Net/Dive/Lure/Moon/Fast/Sport/Beast и т.п.)
+    не учитываются. Остальные бонусы работают.
+    """
     if ball_key in GUARANTEED_BALLS:
         return 100.0
 
     base = BALL_BASE_CHANCE.get(ball_key, 25.0)
 
-    if ball_key == "net_ball":
-        if "water" in species_types or "bug" in species_types:
-            base += 25.0
-    elif ball_key == "dive_ball":
-        if is_underwater:
-            base += 25.0
-    elif ball_key == "nest_ball":
+    if ball_key == "nest_ball":
         if level < 20:
-            base += 25.0
-    elif ball_key == "repeat_ball":
-        if already_caught:
             base += 25.0
     elif ball_key == "timer_ball":
         base += min(50.0, 5.0 * turn_number)
@@ -195,36 +181,21 @@ def _chance_for_ball(
     elif ball_key == "dusk_ball":
         if is_night or is_cave:
             base += 25.0
-    elif ball_key == "sport_ball":
-        if "bug" in species_types:
+    elif ball_key == "dive_ball":
+        if is_underwater:
             base += 25.0
     elif ball_key == "level_ball":
         if level >= 30:
             base += 30.0
         elif level >= 20:
             base += 20.0
-    elif ball_key == "lure_ball":
-        if "water" in species_types:
-            base += 25.0
-    elif ball_key == "moon_ball":
-        if any(t in species_types for t in ("water", "psychic", "fairy", "normal")):
-            base += 25.0
+    elif ball_key == "heavy_ball":
+        if level >= 30:
+            base += 20.0
     elif ball_key == "friend_ball":
         base += 10.0
     elif ball_key == "love_ball":
         base += 15.0
-    elif ball_key == "heavy_ball":
-        if level >= 30:
-            base += 20.0
-    elif ball_key == "fast_ball":
-        if any(t in species_types for t in ("flying", "electric")):
-            base += 25.0
-    elif ball_key == "beast_ball":
-        if (793 <= species_id <= 799) or species_id in (803, 804, 805, 806):
-            base = 95.0
-    elif ball_key == "strange_ball":
-        if level >= 20:
-            base += 20.0
     elif ball_key == "feather_ball":
         base += 5.0
     elif ball_key == "wing_ball":
@@ -254,11 +225,15 @@ class Catch(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
 
-    @app_commands.command(name="catch", description="Ловля покемона")
+    @app_commands.command(
+        name="catch",
+        description="Проверка шанса поимки (сам покемон — от мастера через /give)",
+    )
     @app_commands.describe(
         ball="Покебол из инвентаря персонажа",
-        rarity="Какую группу редкости искать",
+        rarity="Группа редкости цели (влияет на шанс)",
         status="Статус покемона (Сон/Заморозка ×2.5, Паралич/Ожог/Яд ×1.5)",
+        level="Уровень цели (для Nest/Level/Heavy Ball)",
         wounded="Покемон ранен? (+15%)",
         badly_wounded="Сильно ранен? (+25%)",
         underwater="Под водой (для Dive Ball)?",
@@ -276,6 +251,7 @@ class Catch(commands.Cog):
         ball: Optional[app_commands.Choice[str]] = None,
         rarity: Optional[app_commands.Choice[str]] = None,
         status: Optional[app_commands.Choice[str]] = None,
+        level: app_commands.Range[int, 1, 100] = 5,
         wounded: bool = False,
         badly_wounded: bool = False,
         underwater: bool = False,
@@ -310,41 +286,9 @@ class Catch(commands.Cog):
             )
             return
 
-        # ------------------------------------------------------------------ #
-        #  Выбор покемона из нужной группы редкости
-        # ------------------------------------------------------------------ #
-        if rarity_key == COMMON:
-            special = PSEUDO_LEGENDARY_IDS | LEGENDARY_IDS | MYTHICAL_IDS
-            pool = [i for i in range(1, 1026) if i not in special]
-            species_id = random.choice(pool)
-        else:
-            pool = get_ids_for_rarity(rarity_key)
-            if not pool:
-                await interaction.followup.send(
-                    "❌ Для этой группы пока нет покемонов.", ephemeral=True
-                )
-                return
-            species_id = random.choice(pool)
-
-        species_types: list[str] = []
-        data: dict = {}
-        try:
-            data = await pokeapi_client.get_pokemon(species_id)
-            species_types = data.get("types", [])
-        except PokeAPIError:
-            log.warning("PokéAPI недоступен — играем без бонусов к типам")
-
-        actual_rarity = get_rarity(species_id)
-        level = random.randint(2, 15)
-
-        trainer = await get_trainer(uid)
-        already_caught = species_id in trainer.get("pokedex_known", [])
-
         chance = _chance_for_ball(
             ball_key,
-            species_id=species_id,
-            species_types=species_types,
-            level=level,
+            level=int(level),
             is_wounded=wounded,
             is_badly_wounded=badly_wounded,
             status=status_key,
@@ -352,8 +296,7 @@ class Catch(commands.Cog):
             is_cave=cave,
             is_underwater=underwater,
             turn_number=int(turn),
-            already_caught=already_caught,
-            rarity=actual_rarity,
+            rarity=rarity_key,
         )
 
         taken = await take_item(uid, ball_key, 1)
@@ -366,25 +309,21 @@ class Catch(commands.Cog):
         roll = random.randint(1, 100)
         success = roll <= round(chance)
 
-        mon_name = (data.get("name") or "Неизвестный покемон").title()
-        rarity_emoji = RARITY_EMOJI.get(actual_rarity, "⚪")
-        rarity_label = RARITY_LABEL.get(actual_rarity, actual_rarity)
+        rarity_emoji = RARITY_EMOJI.get(rarity_key, "⚪")
+        rarity_label = RARITY_LABEL.get(rarity_key, rarity_key)
 
         embed = discord.Embed(
             title="🎉 Поймал!" if success else "💨 Не поймал",
             description=(
-                f"{rarity_emoji} **{mon_name}** — {rarity_label}\n"
+                f"{rarity_emoji} Цель: **{rarity_label}**\n"
                 f"🎚️ Уровень: **{level}**\n"
                 f"🎯 Шанс поимки: **{chance:.1f}%** (бросок: {roll})\n"
                 f"🎒 Потрачено: **{BALL_NAMES.get(ball_key, ball_key)}** ×1\n"
-                f"📦 Осталось: **{qty - 1}** шт."
+                f"📦 Осталось: **{qty - 1}** шт.\n\n"
+                f"ℹ️ Если поймал — сообщите мастеру, он выдаст покемона через `/give`."
             ),
             color=discord.Color.green() if success else discord.Color.dark_red(),
         )
-        if data.get("artwork"):
-            embed.set_thumbnail(url=data["artwork"])
-        elif data.get("sprite"):
-            embed.set_thumbnail(url=data["sprite"])
 
         await interaction.followup.send(embed=embed)
 
